@@ -102,4 +102,6 @@ como puedes observar también del json se obtiene la transcripción intercalando
 
 en el caso de que se active whisper, habrá que buscar el archivo de audio para cada json con conversation id y communication id determinados, el nombre del archivo de audio deberá tener la misma denominación pero con distinta extensión y se hallará en su carpeta determinada. como ya se dijo antes esta descarga se realizara a partir de un nuevo endpoint de geneys que aun no tenemos y que se atacará para buscar con los identificadores de la transcripción para obtener el audio en cuestión. en el apartado de whisper si este es true, solo se susituirán las frases de la transcripción original, si se encuentra el archivo de audio correspondiente al json y se consigue satisfactoriamente la transcripción mediante whisper. 
 
+la conformación del json con la info estructurada como el que se obtiene de la función leer_transcripción, quizá sea mejor incluirlo en load_call_data_for_evaluation, no?
+
 por otro lado, la creación de datos sintéticos (dummy) de los campos que se obtendrán en el futuro de kollecto para cada llamada, de momento se mantendrá en esta versión. 
