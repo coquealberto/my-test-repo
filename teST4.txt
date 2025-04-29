@@ -1,367 +1,105 @@
-Varios asuntos, como cambiarias el archivo __init__.py de data acquisition. Otro aspecto,  me gustaria poder elegir el intervalo de horas para la descarga. Otro aspecto, me gustaría que el json final tuviera la identificación para el grupo de ítems del conversation_id y el communicaction_id de la transcripción. Por otro lado, quiero añadir el siguiente aspecto y es que la transcripciones se filtraran en un paso adicional tras ser descargadas y antes de descargar su posible versión de audio de la conversación. y esto se hará mediante un campo llamado wrap-up code presente en los datos de la transcripción. he aquí un ejemplo de una transcripción anonimizada. 
+Varios asuntos, como cambiarias el archivo __init__.py de data acquisition. Otro aspecto, me gustaría que el json final tuviera la identificación para el grupo de ítems del conversation_id y el communicaction_id de la transcripción. 
+Por otro lado, quiero añadir el siguiente aspecto y es que la transcripción descargada de genesys se usará en todos los casos y esta tiene el siguiente formato.
+este es un ejemplo de transcripción
+
+
+Próximos asuntos a tratar. Tras obtener la lista de transcripciones potenciales sobre las que se realizará le evaluación de las LLM se hará lo siguiente, y es agrupar la info valiosa del json de la transcripción, en el otro proyecto contaba con la siguiente función para recoger dicha info:
+
+def leer_transcripcion(archivo_json):
+    """
+    Procesa y extrae los datos relevantes de un archivo JSON de transcripción, incluyendo detalles específicos 
+    del wrap up de llamadas realizado por agentes, y devuelve información estructurada para su uso posterior.
+
+    Args:
+        archivo_json (str): Ruta al archivo JSON que contiene los datos de la transcripción.
+
+    Returns:
+        dict or None: Un diccionario conteniendo información estructurada extraída de la transcripción, como
+        códigos de conclusión, descripción, aplicación, dirección de la llamada, y frases relevantes.
+        Retorna None si no se encuentra el código 'wrapUpCode' para un agente o si hay errores al cargar los datos.
+    """
+    datos = load_json(archivo_json)
+
+    tipo = next((participante.get("wrapUpCode") for participante in datos.get("participants", []) if participante.get("participantPurpose") == "agent"), None)
+
+    if tipo is None:
+        logging.warning(f"No se encontró 'wrapUpCode' para un 'agent' en el archivo {archivo_json}")
+        log_interaction('wrap_up_code search', 'failure', f'wrap up code not found for file; {os.path.splitext(archivo_json)[0]}')
+        return None
+
+    json_file_path_wrapup = os.path.join(os.path.dirname(__file__),'..', 'data','wrapup_codes.json')
+    wrapup_codes = load_json(json_file_path_wrapup)
+
+    wrapup_info = wrapup_codes.get(tipo, {})
+
+    # Constitución lista de frases con identificación del interlocutor
+    frases = []
+    hablante_anterior = None
+
+    for transcript in datos.get("transcripts", []):
+        for phrase in transcript.get("phrases", []):
+            texto = phrase.get("text", "").strip()
+            purpose =  phrase.get("participantPurpose", "")
+
+            if purpose == "internal":
+                hablante = "Agente"
+            elif purpose == "external":
+                hablante = "Interlocutor"
+            else:
+                hablante = "Desconocido"
+
+            if not texto:
+                continue
+
+            if frases and hablante == hablante_anterior:
+                # Añadimos al último bloque existente
+                frases[-1] += f" {texto}"
+            else:
+                # Nuevo hablante, nueva línea
+                frases.append(f"{hablante}: {texto}")
+                hablante_anterior = hablante
+
+    return {
+        "codigo_wrapup": wrapup_info.get('Codigos de Conclusion', 'Codigos de Conclusion no disponible'),
+        "descripcion": wrapup_info.get('Descripcion', 'Descripcion no disponible'),
+        "aplicacion": wrapup_info.get('Aplicacion', 'Aplicacion no disponible'),
+        "llamada_dir": "saliente" if datos.get("participants", [{}])[0].get("initialDirection") == "outbound" else "entrante",
+        "indicaciones_ad": wrapup_info.get('Indicaciones Adicionales', 'Indicaciones Adicionales no disponibles'),
+        "frases": frases
+    }
+
+
+como puede obervarse a partir de esta info se tiene la dirección de la la llamada y info adicional según el wrap-up code, esta info estaba almacenada en un json llamado wrapup_codes.json y ahora me gustaria que me ayudaras a ver donde situar esta info, esta info de momento creo que no se usará pero podría añadirse posteriormente como metadata a los LLM:
 
 {
-  "organizationId": "anon-organization-id",
-  "conversationId": "anon-conversation-id",
-  "communicationId": "anon-communication-id",
-  "recordingId": "anon-recording-id",
-  "transcripts": [
-    {
-      "transcriptId": "anon-transcript-id-1",
-      "language": "es-ES",
-      "programId": "anon-program-id",
-      "features": [],
-      "startTime": 1742977522441,
-      "phrases": [],
-      "analytics": {
-        "acoustics": [
-          {
-            "eventType": "acd",
-            "offsetMs": 7991,
-            "startTimeMs": 1742977525354,
-            "durationMs": 563,
-            "participant": "internal"
-          }
-        ]
-      }
+    "62c6d1ab-8b6e-448d-b71b-6febf9a76aea": {
+        "Codigos de Conclusion": "PA (Payment Agreement)",
+        "Descripcion": "Varias opciones: Formalizado acuerdo de pago , Fijada nueva fecha de pago , Pago ya realizado",        
+        "Aplicacion": "Identificar escenarios como PA (Payment Agreement) nuevo tras cambio de condiciones, PA roto o anulado, PA vigente, PA vigente con nueva fecha de vencimiento",
+        "Indicaciones Adicionales": "Identificar el acuerdo final de pago. El número total de expedientes. El número de expedientes sobre los que se ha alcanzado el acuerdo de pago y la cuantía."
     },
-    {
-      "transcriptId": "anon-transcript-id-2",
-      "language": "es-ES",
-      "programId": "anon-program-id",
-      "engineId": "anon-engine-id",
-      "engineProvider": "anon-provider",
-      "features": [
-        "VOICE_TRANSCRIPTION"
-      ],
-      "startTime": 1742977525766,
-      "duration": {
-        "milliseconds": 34425
-      },
-      "phrases": [
-        {
-          "text": "no está disponible",
-          "stability": 1.0,
-          "confidence": 0.9107,
-          "startTimeMs": 1742977527148,
-          "duration": {
-            "milliseconds": 911
-          },
-          "words": [
-            {
-              "word": "no",
-              "confidence": 0.918,
-              "startTimeMs": 1742977527148,
-              "duration": {
-                "milliseconds": 40
-              }
-            },
-            {
-              "word": "está",
-              "confidence": 0.849,
-              "startTimeMs": 1742977527386,
-              "duration": {
-                "milliseconds": 40
-              }
-            },
-            {
-              "word": "disponible",
-              "confidence": 0.965,
-              "startTimeMs": 1742977527584,
-              "duration": {
-                "milliseconds": 475
-              }
-            }
-          ],
-          "alternatives": [],
-          "participantPurpose": "external",
-          "phraseIndex": 0
-        },
-        {
-          "text": "hola",
-          "stability": 1.0,
-          "confidence": 1.0,
-          "startTimeMs": 1742977528520,
-          "duration": {
-            "milliseconds": 39
-          },
-          "words": [
-            {
-              "word": "hola",
-              "confidence": 1.0,
-              "startTimeMs": 1742977528520,
-              "duration": {
-                "milliseconds": 39
-              }
-            }
-          ],
-          "alternatives": [],
-          "participantPurpose": "internal",
-          "phraseIndex": 1
-        },
-        {
-          "text": "y cuenta cuando hayas terminado",
-          "stability": 1.0,
-          "confidence": 0.8076,
-          "startTimeMs": 1742977530960,
-          "duration": {
-            "milliseconds": 1547
-          },
-          "words": [
-            {
-              "word": "y",
-              "confidence": 0.671,
-              "startTimeMs": 1742977530960,
-              "duration": {
-                "milliseconds": 40
-              }
-            },
-            {
-              "word": "cuenta",
-              "confidence": 0.414,
-              "startTimeMs": 1742977531079,
-              "duration": {
-                "milliseconds": 40
-              }
-            },
-            {
-              "word": "cuando",
-              "confidence": 0.987,
-              "startTimeMs": 1742977531476,
-              "duration": {
-                "milliseconds": 40
-              }
-            },
-            {
-              "word": "hayas",
-              "confidence": 0.973,
-              "startTimeMs": 1742977531754,
-              "duration": {
-                "milliseconds": 159
-              }
-            },
-            {
-              "word": "terminado",
-              "confidence": 0.993,
-              "startTimeMs": 1742977532190,
-              "duration": {
-                "milliseconds": 317
-              }
-            }
-          ],
-          "alternatives": [],
-          "participantPurpose": "external",
-          "phraseIndex": 2
-        },
-        {
-          "text": "sí",
-          "stability": 1.0,
-          "confidence": 0.345,
-          "startTimeMs": 1742977560156,
-          "duration": {
-            "milliseconds": 35
-          },
-          "words": [
-            {
-              "word": "sí",
-              "confidence": 0.345,
-              "startTimeMs": 1742977560156,
-              "duration": {
-                "milliseconds": 35
-              }
-            }
-          ],
-          "alternatives": [],
-          "participantPurpose": "internal",
-          "phraseIndex": 3
-        }
-      ],
-      "analytics": {
-        "sentiment": [],
-        "empathy": [],
-        "topics": [
-          {
-            "participant": "external",
-            "topicId": "anon-topic-id",
-            "topicName": "Contacto Indirecto",
-            "topicPhrase": "Él no está",
-            "transcriptPhrase": "no está",
-            "confidence": 94,
-            "startTimeMs": 1742977527148,
-            "duration": {
-              "milliseconds": 278
-            }
-          }
-        ],
-        "acoustics": [
-          {
-            "eventType": "voice",
-            "offsetMs": 3360,
-            "startTimeMs": 1742977525801,
-            "durationMs": 3840,
-            "participant": "external"
-          },
-          {
-            "eventType": "voice",
-            "offsetMs": 6000,
-            "startTimeMs": 1742977528441,
-            "durationMs": 940,
-            "participant": "internal"
-          },
-          {
-            "eventType": "voice",
-            "offsetMs": 8440,
-            "startTimeMs": 1742977530881,
-            "durationMs": 2140,
-            "participant": "external"
-          },
-          {
-            "eventType": "silence",
-            "offsetMs": 10580,
-            "startTimeMs": 1742977533021,
-            "durationMs": 27100,
-            "participant": "both"
-          },
-          {
-            "eventType": "voice",
-            "offsetMs": 37680,
-            "startTimeMs": 1742977560121,
-            "durationMs": 280,
-            "participant": "internal"
-          },
-          {
-            "eventType": "silence",
-            "offsetMs": 37960,
-            "startTimeMs": 1742977560401,
-            "durationMs": 19220,
-            "participant": "both"
-          }
-        ]
-      }
-    }
-  ],
-  "participants": [
-    {
-      "participantPurpose": "customer",
-      "initialDirection": "outbound",
-      "queueId": "anon-queue-id",
-      "divisionId": "anon-division-id",
-      "ani": "tel:+34604010261",
-      "dnis": "tel:+34656564662",
-      "startTimeMs": 1742977522443,
-      "endTimeMs": 1742977580007
+    "63d7f77e-6d33-41e6-9b4c-9b5c786bb326": {
+        "Codigos de Conclusion": "CD sin PTP (Promess To Pay)",
+        "Descripcion": "Contacto directo sin acuerdo de pago",
+        "Aplicacion": "Identificar uno de los escenarios siguientes u otro no mencionado: - Con predisposicion a cerrar acuerdo de pago/negociar. - Negativas claras al pago. - Falta de pago por otros motivos. - No paga debido a Mala Situación Personal.",
+        "Indicaciones Adicionales": "Identificar motivos por los que no se cierra el acuerdo de pago y posibles detalles sobre situacion economica del cliente"
     },
-    {
-      "participantPurpose": "acd",
-      "initialDirection": "outbound",
-      "queueId": "anon-queue-id",
-      "divisionId": "anon-division-id",
-      "ani": "tel:+34604010261",
-      "dnis": "tel:+34656564662",
-      "startTimeMs": 1742977525354,
-      "endTimeMs": 1742977525917
+    "68fd4fee-008b-433d-b049-c5ab2b8c97f2": {
+        "Codigos de Conclusion": "CI",
+        "Descripcion": "Contacto indirecto",
+        "Aplicacion": "tercero que anota recado o facilita informacion, o conoce a interviniente, pero no da recado si no informamos.",
+        "Indicaciones Adicionales": "Identificar si el recado se deja satisfactoriamente y si hay reprogramación."
     },
-    {
-      "participantPurpose": "agent",
-      "userId": "anon-user-id",
-      "teamId": "anon-team-id",
-      "initialDirection": "outbound",
-      "queueId": "anon-queue-id",
-      "divisionId": "anon-division-id",
-      "ani": "tel:+34604010261",
-      "dnis": "tel:+34656564662",
-      "startTimeMs": 1742977525864,
-      "endTimeMs": 1742977579445,
-      "wrapUpCode": "anon-wrap-up-code",
-      "wrapUpNotes": ""
-    }
-  ],
-  "uri": "/transcript/v1/organizations/anon-organization-id/conversations/anon-conversation-id/communications/anon-communication-id",
-  "startTime": 1742977522441,
-  "duration": {
-    "milliseconds": 34425
-  },
-  "mediaType": "call",
-  "conversationStartTime": 1742977517363,
-  "handleTime": "61452",
-  "conversationDuration": 69953,
-  "isNamedEntitiesAnalyzed": false
+
+…
+
+ asi con unos 30 wrap-ups codes.
+
 }
 
-y este es el código que se usaba en el otro proyecto y que se replicará aquí para filtrar las llamadas que proseguirán en el proceso:
 
-import os
-import sys
-from datetime import datetime
+como puedes observar también del json se obtiene la transcripción intercalando las frases como en el json ejemplo e identificando el interlocutor con la info del json de la transcripción. Este campo es el que debería sustituirse por el que se obtendría de whisper en el caso en que se active este camino, por lo que la info del archivo json de la transcripción se usará en ambos casos solo intercambiándose el apartado de frases del diccionario resumen en función del método elegido. 
 
-# Establece la ruta base del proyecto para facilitar el acceso a los módulos del proyecto.
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(project_root)
+en el caso de que se active whisper, habrá que buscar el archivo de audio para cada json con conversation id y communication id determinados, el nombre del archivo de audio deberá tener la misma denominación pero con distinta extensión y se hallará en su carpeta determinada. como ya se dijo antes esta descarga se realizara a partir de un nuevo endpoint de geneys que aun no tenemos y que se atacará para buscar con los identificadores de la transcripción para obtener el audio en cuestión. en el apartado de whisper si este es true, solo se susituirán las frases de la transcripción original, si se encuentra el archivo de audio correspondiente al json y se consigue satisfactoriamente la transcripción mediante whisper. 
 
-from src.file_management import load_json
-from src.logging_config import log_interaction, setup_logging
-
-def filtro_transcripciones():
-    
-    setup_logging('filtro')  # Configura el logging para esta fase específica de descarga.
-
-    # Definir la carpeta donde se encuentran los archivos JSON
-    carpeta_origen = os.path.join(os.getcwd(), '/shared/DDT_Testing/Genesys/JSON')
-
-    codigos_predefinidos = [ "62c6d1ab-8b6e-448d-b71b-6febf9a76aea", "63d7f77e-6d33-41e6-9b4c-9b5c786bb326",  "68fd4fee-008b-433d-b049-c5ab2b8c97f2",
-                            "9c17002f-6f4c-4678-a732-c49d377a3147", "aec7aca9-3a1f-4a13-a74e-2bd238d743d4", "e872ba9a-ff04-487e-9e2a-b65422e6f81f", "0cce61a7-9fe9-4dfd-b9a2-b363c70cdd8e",
-                            "a3ee5ded-17f6-426a-9bf0-5a757fbcb8a1", "ace1877e-fe59-4a5e-bada-ec084ffe2469", "f857ef29-9448-439c-9829-b0e0d155632f", "ININ-WRAP-UP-TIMEOUT"
-                            ]  # Lista de códigos a buscar
-
-    # Inicializar el diccionario para almacenar los conteos de cada código
-    conteo_codigos = {codigo: 0 for codigo in codigos_predefinidos}
-
-    # Recorrer todos los archivos en la carpeta
-    for nombre_archivo in os.listdir(carpeta_origen):
-        ruta_archivo_origen = os.path.join(carpeta_origen, nombre_archivo)
-        
-        # Verificar si el archivo es un archivo JSON
-        if nombre_archivo.endswith(".json"):
-            # Cargar el contenido JSON
-            try:
-                contenido_json = load_json(ruta_archivo_origen)
-                
-                campo_extraido = None
-    
-                # Iterar sobre los participantes para encontrar el 'agent'
-                for participante in contenido_json["participants"]:
-                    if participante.get("participantPurpose") == "agent":
-                        campo_extraido = participante.get("wrapUpCode")
-                        break  # Salir del bucle una vez encontrado el 'agent'
-                    
-                if campo_extraido is None:
-                    print(f"No se encontró 'wrapUpCode' para un 'agent' en el archivo {nombre_archivo}") 
-                    log_interaction('filtering', 'Success', f"Filtered file due to No 'wrapUpCode' found for an 'agent' in the file with conversation Id: {os.path.splitext(nombre_archivo)[0].replace('-transcript', '')}") 
-                    # Eliminar el archivo que no coincide con los códigos predefinidos
-                    os.remove(ruta_archivo_origen)               
-                # Comparar el campo extraído con el código predefinido
-                elif campo_extraido in codigos_predefinidos:
-                    conteo_codigos[campo_extraido] += 1
-                    log_interaction('filtering', 'Success', f"File passes the filter with 'wrap up code' : {campo_extraido}: and conversation Id: {os.path.splitext(nombre_archivo)[0].replace('-transcript', '')}") 
-                else:
-                    # Eliminar el archivo que no coincide con los códigos predefinidos
-                    os.remove(ruta_archivo_origen)
-                    log_interaction('filtering', 'Success', f"Filtered file with 'wrap up code' : {campo_extraido}: and conversation Id: {os.path.splitext(nombre_archivo)[0].replace('-transcript', '')}") 
-
-            except Exception as e:
-                # Eliminar el archivo con error de lectura
-                os.remove(ruta_archivo_origen)
-                print(f"Error al procesar el archivo {nombre_archivo}: {e}")
-                log_interaction('filtering', 'Failure', f"Exception when filtering file with conversation Id: {os.path.splitext(nombre_archivo)[0].replace('-transcript', '')}", {"error":str(e)}) 
-
-    # Calcular la suma total de todas las ocurrencias
-    suma_total = sum(conteo_codigos.values())
-
-    # Imprimir los resultados
-    for codigo, conteo in conteo_codigos.items():
-        print(f"El código '{codigo}' aparece {conteo} veces.")
-    print(f"La suma total de todas las ocurrencias es: {suma_total}")
-
-if __name__ == "__main__":
-    filtro_transcripciones()  
-
+por otro lado, la creación de datos sintéticos (dummy) de los campos que se obtendrán en el futuro de kollecto para cada llamada, de momento se mantendrá en esta versión. 
