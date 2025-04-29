@@ -1,0 +1,365 @@
+quiero desbloquear la parte en la que se descargan las llamadas en main_workflow.py, es decir, esta linea de códgo:
+    # downloader.download_calls(date_range=("2023-01-01", "2023-01-31"))
+
+
+y quiero que me ayudes a implementar en downloader.py un método de un proyecto antiguo
+
+de momento solo tengo acceso a la descarga de transcripciones y no del audio de las llamadas, este el código antiguo que tengo de otro proceso que accede a 
+transcripciones en otro proyecto, por un lado tengo el código principal,:
+
+
+
+import os
+import sys
+import time
+from datetime import timedelta, datetime
+from pytz import timezone
+
+# Establece la ruta base del proyecto para facilitar el acceso a los módulos del proyecto.
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(project_root)
+
+from src.genesys_client import GenesysCloudClient
+from src.file_management import load_json
+from src.logging_config import log_interaction, setup_logging
+from src.utilities import format_date
+
+
+def download_transcriptions():
+    start_time = time.time()
+    setup_logging('descarga')  # Configura el logging para esta fase específica de descarga.
+
+    # Directorio de salida para guardar las transcripciones descargadas.
+    output_directory = os.path.join(os.getcwd(), '/shared/DDT_Testing/Genesys/JSON')
+    # Convertir las fechas de entorno a objetos datetime en la zona horaria correcta
+    start_date_str = os.environ.get("START_DATE")
+    end_date_str = os.environ.get("END_DATE")
+    if not start_date_str or not end_date_str:
+        raise ValueError("START_DATE y END_DATE son requeridos.")
+    
+    start_date = datetime.fromisoformat(start_date_str).astimezone(madrid_timezone)
+    end_date = datetime.fromisoformat(end_date_str).astimezone(madrid_timezone)
+
+    # ejemplo end_date formato de entrada, END_DATE="2023-01-01T23:59:59+00:00"
+
+    # Obtiene el desplazamiento en formato +HHMM
+    offset = start_date.strftime("%z")  # Esto devuelve el desplazamiento en formato +HHMM
+    offset_formatted = offset[:3]  # Solo toma +HH
+    
+    # Configura la duración de cada intervalo de tiempo para la consulta en minutos
+    paso_bucle = 60
+    # Configura el máximo de intentos de reintentos y el tiempo de espera entre ellos
+    max_retries = 3
+    retry_delay = 2
+
+    # Inicializa el cliente de Genesys Cloud con las credenciales de autenticación
+    client = GenesysCloudClient(
+        client_id=os.getenv("GENESYS_CLOUD_CLIENT_ID"),
+        client_secret=os.getenv("GENESYS_CLOUD_CLIENT_SECRET"),
+        environment=os.getenv("GENESYS_CLOUD_ENVIRONMENT")
+    )
+
+    # Intenta autenticarse para obtener un token de acceso
+    access_token = client.authenticate("application/x-www-form-urlencoded")
+    if not access_token:
+        print("Authentication failed.")
+        log_interaction('authenticate', 'Failure', 'No access token provided. End of the process.')
+        return
+
+    # Carga los parámetros de consulta para las llamadas de la API desde un archivo JSON
+    search_query = load_json(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'Json-Transcripts-iso.json'))
+
+    # Procesa los datos en intervalos hasta cubrir todo el rango de tiempo definido
+    end_date_bucle = start_date + timedelta(minutes=paso_bucle)
+    while end_date_bucle <= end_date:
+        # Actualizar los valores de fecha en la consulta de búsqueda
+        search_query['query'][3]['startValue'] = start_date.strftime("%Y-%m-%dT%H:%M:%S.%f+02")
+        search_query['query'][3]['endValue'] = end_date_bucle.strftime("%Y-%m-%dT%H:%M:%S.%f+02")
+
+        print("Interval:", start_date.strftime("%Y-%m-%d %H:%M:%S"), "-", end_date_bucle.strftime("%Y-%m-%d %H:%M:%S"))
+        # Realizar la búsqueda de transcripciones para el intervalo de tiempo actual
+        search_results = client.search_all_transcripts(access_token, search_query)
+
+
+        if not search_results:
+            print("No transcripts found for this interval")
+        else:
+            print("Batch de transcripciones en esta iteracion:",len(search_results))
+            # Iterar sobre los resultados de la búsqueda
+            for index, result in enumerate(search_results,start=1):
+                conversation_id = result["conversationId"]
+                communication_id = result["communicationId"]
+                startTime = result["startTime"]
+
+                # Obtener la URL de la transcripción
+                transcript_url, success =client.get_transcript_url_from_conversation(access_token, conversation_id, communication_id)
+                # Mostrar por pantalla el número de archivo que se esta descargando dentro del batch
+                #sys.stdout.write(f"\rDescargando archivo {index} de {len(search_results)}")
+                #sys.stdout.flush()
+
+                # Descargar la transcripción
+                if success:
+                    client.download_transcript(transcript_url, conversation_id, communication_id, startTime, output_directory, max_retries, retry_delay)
+                else:
+                    log_interaction('Download Transcript', 'Not achieved', f'URL not found for this conversation with conversation ID: {conversation_id} and communication ID: {communication_id}')
+
+            #sys.stdout.write("\n")              
+                    
+        # Avanza al siguiente intervalo de tiempo
+        start_date += timedelta(minutes=paso_bucle)
+        end_date_bucle += timedelta(minutes=paso_bucle)
+    
+
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print("Tiempo de ejecución:", execution_time, "segundos")
+    execution_time_minutes = execution_time / 60
+    print("Tiempo de ejecución en minutos:", execution_time_minutes)
+
+
+if __name__ == "__main__":
+    download_transcriptions()
+
+
+
+import requests
+import time
+import os
+import base64
+
+from .logging_config import log_interaction
+from .file_management import write_json_file
+
+class GenesysCloudClient:
+    """
+    Cliente para interactuar con la API de Genesys Cloud.
+
+    Gestiona la autenticación y recuperación de detalles de conversaciones y transcripciones utilizando la API de Genesys Cloud.
+
+    Attributes:
+        client_id (str): ID del cliente para la autenticación OAuth.
+        client_secret (str): Secreto del cliente para la autenticación OAuth.
+        environment (str): Entorno de la API Genesys Cloud (p.ej., 'mypurecloud.com').
+        access_token (str): Token de acceso obtenido tras la autenticación.
+    """
+
+    def __init__(self, client_id, client_secret, environment):
+        """
+        Inicializa el cliente de Genesys Cloud con las credenciales y el entorno especificados.
+
+        Args:
+            client_id (str): El ID del cliente utilizado para la autenticación OAuth.
+            client_secret (str): El secreto del cliente utilizado para la autenticación OAuth.
+            environment (str): El dominio del entorno de Genesys Cloud.
+        """
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.environment = environment
+        self.access_token = None
+
+    def authenticate(self, content_type_form_urlencoded="application/x-www-form-urlencoded"):
+        """
+        Autentica al cliente utilizando las credenciales del cliente para obtener un token de acceso.
+
+        Returns:
+            str or None: El token de acceso si la autenticación es exitosa, None en caso contrario.
+        """
+        try:
+            authorization = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+            headers = {
+                "Authorization": f"Basic {authorization}",
+                "Content-Type": content_type_form_urlencoded
+            }
+            data = {"grant_type": "client_credentials"}
+            response = requests.post(f"https://login.{self.environment}/oauth/token", data=data, headers=headers)
+            response.raise_for_status()
+            log_interaction('authenticate', 'Success', f'Access token Generated')
+            return response.json()['access_token']
+        except Exception as e:
+            print(f"Exception occurred during authentication. error: {e}")
+            log_interaction('authenticate', 'Failure', f'Failed to authenticate.', {"error": str(e)})
+            return None
+        
+
+   
+    #Función usada con el metodo sin prefiltro
+    def search_all_transcripts(self, access_token, search_query):
+        """
+        Realiza la búsqueda de transcripciones para la fecha especificada, manejando paginación.
+        Esta función consulta la API de Genesys para obtener todas las transcripciones que coinciden con el criterio de búsqueda,
+        manejando automáticamente la paginación para recopilar todos los resultados posibles.
+        
+        Args:
+            access_token (str): Token de acceso para la autenticación de la API.
+            search_query (dict): Parámetros de búsqueda que incluyen detalles como fecha, palabras clave, etc.
+
+        Returns:
+            list: Lista de todas las transcripciones encontradas que cumplen con los criterios de búsqueda.
+            
+        Raises:
+            Exception: Captura cualquier excepción que ocurra durante la búsqueda y la logra antes de reanudarla.
+        """
+        all_results = []  # Lista para almacenar todos los resultados acumulados de todas las páginas
+        try:
+            search_url = f"https://api.{self.environment}/api/v2/speechandtextanalytics/transcripts/search"  # URL de la API para búsqueda de transcripciones
+            headers = {"Authorization": f"Bearer {access_token}"}  # Cabeceras de autenticación
+            page_size = 100  # Establece el tamaño máximo de página para limitar el número de resultados por solicitud
+            page_number = 1  # Inicia en la primera página
+            total_pages = None  # Inicializa el número total de páginas como desconocido
+
+            # Ciclo para manejar la paginación hasta que se recorran todas las páginas disponibles
+            while total_pages is None or page_number <= total_pages:
+                search_query['pageSize'] = page_size  # Añade/actualiza el tamaño de página en los parámetros de búsqueda
+                search_query['pageNumber'] = page_number  # Añade/actualiza el número de página actual en los parámetros de búsqueda
+                response = requests.post(search_url, json=search_query, headers=headers)  # Realiza la petición POST a la API
+                response.raise_for_status()  # Verifica que la respuesta de la API no contenga errores
+                result = response.json()  # Convierte la respuesta en formato JSON
+                all_results.extend(result["results"])  # Añade los resultados de la página actual a la lista total
+
+                # Actualiza el número total de páginas basado en la respuesta, solo si aún no se ha establecido
+                if total_pages is None:
+                    print("Transcripts found for this interval", result["total"])  # Imprime el total de transcripciones encontradas
+                    total_pages = result.get('pageCount', 1)  # Obtiene el número total de páginas desde la respuesta, usa 1 si no está presente
+                page_number += 1  # Incrementa el número de página para la siguiente iteración
+
+            # Registra la operación exitosa con detalles de búsqueda
+            log_interaction('search_all_transcripts', 'Success', f'Searching for conversation IDs for this batch with these search parameters.', {"search_query": search_query})      
+            return all_results  # Devuelve la lista completa de resultados
+        except Exception as e:
+            # Maneja cualquier excepción durante el proceso, imprime el error y lo registra
+            print(f"Exception occurred when searching for transcripts or transcripts pages limit reached. error: {e}")
+            log_interaction('search_all_transcripts', 'Failure', f'Exception occurred when searching for transcripts or transcripts pages limit reached.',{"error": str(e),"search_query": search_query})    
+            return all_results  # Devuelve los resultados acumulados hasta el punto del error
+    
+
+    def get_transcript_url_from_conversation(self, access_token, conversation_id, communication_id):
+        """
+        Obtiene la URL de descarga de la transcripción para una conversación y comunicación específicas.
+
+        Args:
+            access_token (str): Token de acceso para la autenticación de la API.
+            conversation_id (str): ID de la conversación.
+            communication_id (str): ID de la comunicación.
+
+        Returns:
+            tuple: URL de la transcripción y un booleano indicando el éxito de la operación.
+        """
+        try:
+            transcript_url = f"https://api.{self.environment}/api/v2/speechandtextanalytics/conversations/{conversation_id}/communications/{communication_id}/transcripturl"
+            headers = {"Authorization": f"Bearer {access_token}"}
+            response = requests.get(transcript_url, headers=headers)
+            response.raise_for_status()
+            log_interaction('get_transcript_url', 'Success', f'Generating download URL for JSON file with conversation ID: {conversation_id} and communication ID: {communication_id}')  
+            return response.json()["url"], True
+        except Exception as e:
+            print(f"Exception occurred when getting transcript URL. error: {e}")
+            log_interaction('get_transcript_url', 'Failure', f'Exception when getting the download URL for JSON file with conversation ID: {conversation_id} and communication ID: {communication_id}.',{"error": str(e)})    
+            return None, False
+        
+    @staticmethod
+    def download_transcript(transcript_url, conversation_id, communication_id, startTime, output_directory, max_retries=3, retry_delay=2):
+        """
+        Descarga una transcripción desde una URL dada y la guarda en un archivo JSON local.
+
+        Args:
+            transcript_url (str): URL desde donde se descargará la transcripción.
+            conversation_id (str): ID de la conversación para la cual se descarga la transcripción, usado para nombrar el archivo.
+            output_directory (str): Directorio local donde se guardará el archivo de la transcripción.
+            max_retries (int, optional): Número máximo de intentos para descargar la transcripción. Valor predeterminado es 3.
+            retry_delay (int, optional): Tiempo de espera en segundos entre intentos fallidos. Valor predeterminado es 2.
+
+        Description:
+            Intenta descargar una transcripción de la URL proporcionada. Si el primer intento falla debido a errores de
+            red o problemas de servidor, realizará reintentos según el número especificado por 'max_retries'. 
+            Si se alcanza el número máximo de reintentos sin éxito, se registra el fallo y se termina el proceso.
+            En caso de éxito, la transcripción se guarda en el directorio especificado en formato JSON.
+        
+        Returns:
+            None: Esta función no retorna un valor sino que guarda el archivo directamente en el sistema de archivos local.
+        """
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                response = requests.get(transcript_url)
+                if response.status_code == 200:
+                    log_interaction('download_transcript', 'Success', f'Dwowload transcript (JSON file) with conversation ID: {conversation_id} ') 
+                    transcript_filename = f"{conversation_id}-transcript-{communication_id}-startTime-{startTime}.json"
+                    transcript_data = response.json()
+                    success = write_json_file(transcript_data, os.path.join(output_directory, transcript_filename))
+                    if not success:
+                        log_interaction('download_transcript', 'Failure', f'Exception when saving the file (JSON file) with conversation ID: {conversation_id} . Try nº: {retry_count}', {"Status code": str(response.status_code)})
+                    return
+                else:
+                    print(f"Failed to download transcript. Status code: {response.status_code}.")
+                    log_interaction('download_transcript', 'Failure', f'Exception when downloading transcript (JSON file) with conversation ID: {conversation_id} . Try nº: {retry_count}', {"Status code": str(response.status_code)})   
+                    retry_count += 1
+                    
+            except Exception as e:
+                retry_count += 1
+                time.sleep(retry_delay)
+                print(f"Exception occurred when downloading transcript from URL: {transcript_url}. Retrying.... error: {e}")
+                log_interaction('download_transcript', 'Failure', f'Exception occurred when downloading transcript (JSON file) with conversation ID: {conversation_id}.', {"error": str(e)}) 
+
+        print("Max retries reached. Unable to download transcript.") 
+        log_interaction('download_transcript', 'Failure', f'Max retries reached. Unable to download transcript (JSON file) with conversation ID: {conversation_id} .') 
+
+
+archivo Json_transcripts-iso.json
+{
+  "types": [
+    "transcripts"
+  ],
+  "returnFields": [
+    "conversationId",
+    "communicationId",
+    "duration",
+    "startTime"
+  ],
+  "query": [
+    {
+      "type": "EXACT",
+      "fields": [
+        "language"
+      ],
+      "value": "es-es"
+    },
+    {
+      "type": "EXACT",
+      "fields": [
+        "mediaType"
+      ],
+      "value": "call"
+    },
+    {
+      "type": "GREATER_THAN",
+      "fields": [
+        "duration"
+      ],
+      "value": "15000"
+    },
+    {
+      "type": "DATE_RANGE",
+      "fields": [
+        "conversationStartTime"
+      ],
+      "startValue": "2024-04-25T00:00:00.000000+02",
+      "endValue": "2024-04-25T00:59:59.999999+02",
+      "dateFormat": "yyyy-MM-dd'T'HH:mm:ss.SSSSSSX"
+    }
+  ],
+  "pageSize": 100,
+  "pageNumber": 1
+}
+
+
+
+
+quizá para nuestro caso pueda incluirse este diccionario dentro de algún archivo de configuración en lugar de dentro de un archivo json auxiliar.
+
+por otro lado ten en cuenta que de  momento no tenemos la función para descargar los audios de las llamadas asi que no se incluye esta parte aun pero presumiblemente será una o varias funciones nuevas
+
+en la clase de genesys client, quizá linkadas al conversation_id.
+
+
+
+
