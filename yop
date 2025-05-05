@@ -1,0 +1,870 @@
+¡Excelente! Vamos a preparar el README.md y todo el código Python necesario para la estructura de repositorio que definimos.
+Nota Importante sobre los Datos: El siguiente código asume que tú proporcionarás los documentos PDF ya clasificados en la estructura de carpetas esperada dentro de data/raw/. Sin estos datos iniciales, los scripts de preprocesamiento y entrenamiento no podrán funcionar.
+1. README.md
+# POC: Clasificador de Documentos Legales
+
+Este repositorio contiene el código para una Prueba de Concepto (POC) destinada a clasificar documentos legales en español utilizando técnicas de Procesamiento de Lenguaje Natural (NLP) y Machine Learning.
+
+**Fecha Actual:** 5 de mayo de 2025 (Recuerda actualizar las dependencias y modelos si retomas el proyecto mucho después).
+
+## Objetivo de la POC
+
+El objetivo principal es evaluar la viabilidad de clasificar automáticamente documentos legales en un conjunto reducido y predefinido de categorías utilizando un enfoque basado en el contenido textual extraído de archivos PDF.
+
+**Categorías Iniciales (POC):**
+1.  `demanda monitorio`
+2.  `decanato monitorio`
+3.  `admisión a trámite`
+4.  `decanato ejecutivo`
+
+## Objetivo a Largo Plazo
+
+La intención final es implementar una solución más robusta, potencialmente utilizando servicios en la nube como **Azure Document Intelligence (Custom Classification)**, que permiten entrenar modelos personalizados no solo basados en texto, sino también en la estructura y layout del documento, utilizando documentos previamente etiquetados. Esta POC sirve como paso inicial fundamental.
+
+## Características
+
+* Conversión de documentos PDF a formato Markdown utilizando `markitdown`.
+* Preprocesamiento de texto básico.
+* Entrenamiento de un modelo de clasificación basado en TF-IDF y Support Vector Machine (SVM).
+* Evaluación del modelo utilizando métricas estándar (Accuracy, Precision, Recall, F1-Score) y Matriz de Confusión.
+* Scripts para preprocesar, entrenar, evaluar y predecir.
+
+## Estructura del Repositorio
+
+legal_doc_classifier_poc/
+│
+├── data/                  # Datos del proyecto (NO incluidos en Git por defecto)
+│   ├── raw/               # PDFs originales (ORGANIZAR AQUÍ TUS PDFs por etiqueta)
+│   │   ├── demanda_monitorio/
+│   │   ├── decanato_monitorio/
+│   │   ├── admision_tramite/
+│   │   └── decanato_ejecutivo/
+│   ├── processed/         # Archivos Markdown generados por preprocessing.py
+│   └── labeled/           # Archivos con texto y etiquetas (e.g., labeled_documents.csv)
+│
+├── notebooks/             # Jupyter notebooks para exploración (no código de producción)
+│   └── 01_data_preprocessing.ipynb # Ejemplo: Explorar Markitdown
+│   └── 02_model_training_tfidf.ipynb # Ejemplo: Prototipar modelo TF-IDF
+│   └── 03_evaluation.ipynb         # Ejemplo: Analizar resultados
+│
+├── src/                   # Código fuente principal Python
+│   ├── __init__.py
+│   ├── preprocessing.py   # Script para convertir PDF->MD y crear dataset etiquetado
+│   ├── training.py        # Script para entrenar el modelo de clasificación
+│   ├── evaluation.py      # Script para evaluar el modelo entrenado con el test set
+│   └── predict.py         # Script para clasificar un nuevo documento (Markdown)
+│
+├── models/                # Modelos entrenados (NO incluidos en Git por defecto)
+│   └── tfidf_svm/         # Modelo TF-IDF+SVM guardado
+│
+├── results/               # Resultados de la evaluación (NO incluidos en Git por defecto)
+│   └── confusion_matrix_test.png
+│   └── classification_report_test.csv
+│
+├── .gitignore             # Archivos y carpetas a ignorar por Git
+├── requirements.txt       # Dependencias de Python
+└── README.md              # Este archivo
+
+## Configuración del Entorno
+
+1.  **Clonar el Repositorio:**
+    ```bash
+    git clone <URL_DEL_REPOSITORIO>
+    cd legal_doc_classifier_poc
+    ```
+
+2.  **Crear y Activar Entorno Virtual:**
+    ```bash
+    python -m venv venv
+    # Linux / macOS
+    source venv/bin/activate
+    # Windows (cmd/powershell)
+    # venv\Scripts\activate
+    ```
+
+3.  **Instalar Dependencias:**
+    ```bash
+    pip install -U pip
+    pip install -r requirements.txt
+    ```
+
+4.  **Instalar `markitdown`:** Asegúrate de tener `markitdown` instalado y accesible desde tu línea de comandos (PATH). Sigue las instrucciones de instalación de [Markitdown](https://github.com/taufik-hidayat/markitdown) si aún no lo tienes.
+
+## Preparación de Datos (**¡Acción Requerida!**)
+
+1.  **Coloca tus archivos PDF** dentro de la carpeta `data/raw/`. Debes crear subcarpetas con nombres que se correspondan a las claves usadas en `src/preprocessing.py` (por defecto: `demanda_monitorio`, `decanato_monitorio`, `admision_tramite`, `decanato_ejecutivo`). Cada subcarpeta contendrá únicamente los PDFs correspondientes a esa etiqueta.
+    ```
+    data/raw/
+    ├── demanda_monitorio/
+    │   ├── doc1.pdf
+    │   └── doc2.pdf
+    ├── decanato_monitorio/
+    │   ├── doc3.pdf
+    ├── admision_tramite/
+    │   ├── doc4.pdf
+    │   └── doc5.pdf
+    └── decanato_ejecutivo/
+        └── doc6.pdf
+    ```
+2.  **Ejecuta el script de preprocesamiento:**
+    ```bash
+    python src/preprocessing.py
+    ```
+    Esto convertirá los PDFs a Markdown (guardados en `data/processed/`) y creará el archivo `data/labeled/labeled_documents.csv` con el texto extraído y las etiquetas correspondientes. Revisa la salida por posibles errores de conversión.
+
+## Uso
+
+1.  **Entrenamiento del Modelo:**
+    Una vez que tengas `labeled_documents.csv` (generado en el paso anterior), entrena el modelo:
+    ```bash
+    python src/training.py
+    ```
+    Esto dividirá los datos, entrenará el pipeline TF-IDF+SVM, mostrará métricas en el conjunto de validación y guardará el modelo entrenado en la carpeta `models/tfidf_svm/`.
+
+2.  **Evaluación del Modelo:**
+    Para evaluar el rendimiento final del modelo en el conjunto de prueba (reservado):
+    ```bash
+    python src/evaluation.py
+    ```
+    Esto cargará el modelo guardado, realizará predicciones en el conjunto de prueba y generará/guardará un informe de clasificación (`results/classification_report_test.csv`) y una matriz de confusión (`results/confusion_matrix_test.png`).
+
+3.  **Predicción de Nuevos Documentos:**
+    Para clasificar un nuevo documento (que primero debes convertir a Markdown manualmente o usando `markitdown`):
+    ```bash
+    # Ejemplo: Clasificar un archivo llamado 'nuevo_documento.md'
+    python src/predict.py data/processed/nuevo_documento.md
+    ```
+    El script cargará el modelo entrenado y mostrará la etiqueta predicha para el archivo proporcionado.
+
+## Modelo Utilizado y Alternativas
+
+* **Actual:** TF-IDF + Linear SVM (via Scikit-learn). Es un baseline robusto y eficiente.
+* **Alternativas Consideradas (para futuro):**
+    * Otros clasificadores clásicos (Naive Bayes, Random Forest).
+    * Modelos basados en Transformers (como BETO, DistilBERT, mBERT) usando la biblioteca `transformers` de Hugging Face para fine-tuning. Requerirían más recursos computacionales (GPU) y una implementación más compleja.
+    * Modelos Generativos (LLMs) vía Ollama: Se podría experimentar con prompting (zero-shot/few-shot) para clasificación, aunque puede ser menos consistente para una tarea específica como esta.
+
+## Métricas de Evaluación
+
+Se utilizan las siguientes métricas estándar (calculadas por `scikit-learn`):
+* Accuracy
+* Precision (por clase y promedio)
+* Recall (por clase y promedio)
+* F1-Score (por clase y promedio)
+* Matriz de Confusión
+
+## Pila Tecnológica
+
+* Python 3.8+
+* Scikit-learn
+* Pandas
+* Markitdown (herramienta externa CLI)
+* Matplotlib / Seaborn (para visualización)
+* Jupyter Lab (opcional, para notebooks)
+
+## Licencia
+
+Este proyecto se distribuye bajo la licencia MIT. Ver el archivo `LICENSE` para más detalles (Nota: Necesitarías añadir un archivo LICENSE si quieres especificar una). Se sugiere la [Licencia MIT](https://opensource.org/licenses/MIT).
+
+## Contacto
+
+[Tu Nombre / Nombre del Equipo] - [Tu Email / Contacto]
+
+2. requirements.txt
+pandas>=1.3.0
+scikit-learn>=1.0.0
+joblib>=1.0.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+# markitdown se instala separadamente (ver README)
+# jupyterlab es opcional para los notebooks
+# jupyterlab
+
+3. .gitignore
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# Usually these files are written by a python script from a template
+# before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+# Pipfile.lock
+
+# poetry
+# poetry.lock
+
+# pdm
+# pdm.lock
+# .pdm.toml
+
+# PEP 582; used by PDM, PEP 582 designated tool
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# RStudio project settings
+.Rproj.user/
+
+# Visual Studio Code settings
+.vscode/
+
+# Pycharm project settings
+.idea/
+
+# Mac swap files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Log files
+*.log
+
+# Archivos específicos del proyecto
+/data/raw/
+/data/processed/
+/data/labeled/*.csv
+/models/
+/results/*.csv
+/results/*.png
+*.joblib
+
+4. src/__init__.py
+(Este archivo puede estar vacío. Sirve para que Python trate la carpeta src como un paquete).
+5. src/preprocessing.py
+import os
+import subprocess
+import pandas as pd
+from pathlib import Path
+import argparse
+import logging
+import re
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ---
+
+# Asegúrate de que estos nombres coincidan EXACTAMENTE con tus carpetas en data/raw/
+# y con las etiquetas deseadas.
+LABEL_MAP = {
+    'demanda_monitorio': 'demanda monitorio',
+    'decanato_monitorio': 'decanato monitorio',
+    'admision_tramite': 'admisión a trámite', # Cuidado con acentos y caracteres especiales en nombres de carpeta si los usas
+    'decanato_ejecutivo': 'decanato ejecutivo'
+}
+
+BASE_DATA_PATH = Path('data')
+RAW_FOLDER = BASE_DATA_PATH / 'raw'
+PROCESSED_FOLDER = BASE_DATA_PATH / 'processed'
+LABELED_FOLDER = BASE_DATA_PATH / 'labeled'
+OUTPUT_CSV = LABELED_FOLDER / 'labeled_documents.csv'
+
+# --- Funciones ---
+
+def clean_text(text):
+    """Limpia el texto de Markdown: quita saltos de línea excesivos, etc."""
+    if not isinstance(text, str):
+        return ""
+    # Reemplaza múltiples espacios/saltos de línea con uno solo
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Aquí podrías añadir más limpieza: quitar cabeceras/pies de página comunes, etc.
+    # text = text.lower() # Opcional: convertir a minúsculas
+    return text
+
+def convert_pdf_to_md(pdf_path, output_dir):
+    """Convierte un PDF a Markdown usando markitdown CLI."""
+    pdf_file = Path(pdf_path)
+    md_file = Path(output_dir) / f"{pdf_file.stem}.md"
+    output_dir.mkdir(parents=True, exist_ok=True) # Asegura que el directorio de salida exista
+
+    command = ['markitdown', str(pdf_file), '--output-dir', str(output_dir)]
+    logging.info(f"Ejecutando comando: {' '.join(command)}")
+
+    try:
+        # Asegúrate de que markitdown esté en el PATH o proporciona la ruta completa
+        result = subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8')
+        logging.info(f"Convertido: {pdf_file.name} -> {md_file.name}")
+        # logging.debug(f"Salida Markitdown:\n{result.stdout}") # Descomentar para debug
+        if result.stderr:
+             logging.warning(f"Markitdown stderr para {pdf_file.name}:\n{result.stderr}")
+        return str(md_file)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error de Markitdown convirtiendo {pdf_file.name}: {e}")
+        logging.error(f"Stderr: {e.stderr}")
+        return None
+    except FileNotFoundError:
+        logging.error("Error Crítico: El comando 'markitdown' no se encontró.")
+        logging.error("Asegúrate de que esté instalado y en el PATH del sistema.")
+        raise # Detiene la ejecución si markitdown no se encuentra
+    except Exception as e:
+        logging.error(f"Error inesperado convirtiendo {pdf_file.name}: {e}")
+        return None
+
+def process_folder(raw_folder_path, processed_folder, label):
+    """Convierte todos los PDFs en una carpeta, lee el MD y asigna una etiqueta."""
+    if not raw_folder_path.is_dir():
+        logging.warning(f"La carpeta de entrada no existe: {raw_folder_path}")
+        return []
+
+    data = []
+    pdf_files = list(raw_folder_path.glob('*.pdf'))
+    logging.info(f"Encontrados {len(pdf_files)} archivos PDF en {raw_folder_path}")
+
+    if not pdf_files:
+        logging.warning(f"No se encontraron archivos PDF en: {raw_folder_path}")
+        return []
+
+    for pdf_file in pdf_files:
+        md_path_str = convert_pdf_to_md(pdf_file, processed_folder)
+        if md_path_str:
+            md_path = Path(md_path_str)
+            try:
+                # Intentar leer con varias codificaciones comunes si falla UTF-8
+                encodings_to_try = ['utf-8', 'latin-1', 'cp1252']
+                content = None
+                for enc in encodings_to_try:
+                    try:
+                        with open(md_path, 'r', encoding=enc) as f:
+                            content = f.read()
+                        logging.debug(f"Archivo {md_path.name} leído con encoding {enc}")
+                        break # Salir del bucle si la lectura fue exitosa
+                    except UnicodeDecodeError:
+                        logging.warning(f"Fallo al leer {md_path.name} con encoding {enc}. Intentando siguiente...")
+                    except Exception as e_read:
+                        logging.error(f"Error inesperado leyendo {md_path.name} con encoding {enc}: {e_read}")
+                        # Continuar intentando con otras codificaciones si es un error genérico
+
+                if content is None:
+                     logging.error(f"No se pudo leer el archivo {md_path.name} con ninguna codificación probada. Saltando archivo.")
+                     continue # Saltar este archivo si no se pudo leer
+
+                content_cleaned = clean_text(content)
+                if not content_cleaned:
+                    logging.warning(f"El contenido del archivo {md_path.name} quedó vacío después de la limpieza.")
+
+                data.append({
+                    'source_pdf': pdf_file.name,
+                    'markdown_file': md_path.name,
+                    'text': content_cleaned,
+                    'label': label
+                })
+            except FileNotFoundError:
+                logging.error(f"El archivo Markdown {md_path_str} fue reportado como creado pero no se encuentra.")
+            except Exception as e:
+                logging.error(f"Error procesando el archivo Markdown {md_path_str}: {e}")
+    return data
+
+# --- Script Principal ---
+def main():
+    logging.info("--- Iniciando Script de Preprocesamiento ---")
+
+    # Crear directorios de salida si no existen
+    PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
+    LABELED_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    all_data = []
+    found_folders = 0
+
+    for folder_name, label in LABEL_MAP.items():
+        raw_folder_path = RAW_FOLDER / folder_name
+        if raw_folder_path.is_dir():
+            found_folders += 1
+            logging.info(f"\nProcesando carpeta: {raw_folder_path} para etiqueta: '{label}'")
+            # Guardar Markdowns en la carpeta general processed/
+            folder_data = process_folder(raw_folder_path, PROCESSED_FOLDER, label)
+            all_data.extend(folder_data)
+            logging.info(f"Procesados {len(folder_data)} documentos de la carpeta {folder_name}.")
+        else:
+            logging.warning(f"Carpeta no encontrada, saltando: {raw_folder_path}")
+
+    if found_folders == 0:
+        logging.error("¡Error Crítico! No se encontró ninguna de las carpetas esperadas en data/raw/.")
+        logging.error(f"Carpetas esperadas (basadas en LABEL_MAP): {list(LABEL_MAP.keys())}")
+        logging.error("Por favor, crea estas carpetas y coloca tus archivos PDF dentro.")
+        return # Salir si no hay datos
+
+    if not all_data:
+         logging.error("¡Error Crítico! No se procesó ningún documento correctamente.")
+         logging.error("Revisa los logs anteriores para ver posibles errores de conversión o lectura.")
+         return
+
+    # Crear un DataFrame y guardarlo
+    df = pd.DataFrame(all_data)
+
+    # Verificar si hay textos vacíos después de la limpieza
+    empty_texts = df[df['text'] == ''].shape[0]
+    if empty_texts > 0:
+        logging.warning(f"{empty_texts} documentos resultaron con texto vacío después de la limpieza.")
+        # Opcional: eliminar filas con texto vacío
+        # df = df[df['text'] != '']
+        # logging.info(f"Eliminadas {empty_texts} filas con texto vacío.")
+
+    if df.empty:
+        logging.error("El DataFrame final está vacío. No se guardará ningún archivo CSV.")
+        return
+
+    try:
+        df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8')
+        logging.info(f"\nDatos procesados y guardados exitosamente en: {OUTPUT_CSV}")
+        logging.info(f"Total de documentos procesados: {len(df)}")
+        logging.info("Distribución de etiquetas:")
+        logging.info(f"\n{df['label'].value_counts()}")
+    except Exception as e:
+        logging.error(f"Error al guardar el archivo CSV en {OUTPUT_CSV}: {e}")
+
+    logging.info("--- Script de Preprocesamiento Finalizado ---")
+
+if __name__ == "__main__":
+    main()
+
+6. src/training.py
+import pandas as pd
+from pathlib import Path
+import joblib
+import logging
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.utils import class_weight
+import numpy as np
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ---
+LABELED_DATA_PATH = Path('data/labeled/labeled_documents.csv')
+MODEL_DIR = Path('models/tfidf_svm')
+MODEL_PATH = MODEL_DIR / 'tfidf_svm_pipeline.joblib'
+MAPPING_PATH = MODEL_DIR / 'label_mapping.joblib'
+TEST_SET_PATH = Path('data/labeled/test_set.csv') # Guardaremos el test set para evaluation.py
+TRAINVAL_SET_PATH = Path('data/labeled/train_val_set.csv') # Guardaremos train+val temporalmente
+
+# Parámetros del Modelo y División
+TEST_SIZE = 0.15  # 15% para el conjunto de prueba final
+VALIDATION_SIZE = 0.15 # 15% del total original para validación (aprox 0.1765 de lo que queda después del test split)
+RANDOM_STATE = 42 # Para reproducibilidad
+
+# Hiperparámetros del Pipeline (puedes ajustarlos)
+TFIDF_MAX_DF = 0.95
+TFIDF_MIN_DF = 2
+TFIDF_NGRAM_RANGE = (1, 2) # Usar unigramas y bigramas
+SVM_C = 1.0 # Parámetro de regularización SVM
+
+# --- Funciones ---
+
+def load_data(file_path):
+    """Carga los datos etiquetados desde un CSV."""
+    if not file_path.exists():
+        logging.error(f"El archivo de datos etiquetados no se encuentra en: {file_path}")
+        logging.error("Asegúrate de haber ejecutado 'python src/preprocessing.py' primero.")
+        return None
+    try:
+        df = pd.read_csv(file_path)
+        # Manejar posibles NaNs introducidos o existentes
+        df.dropna(subset=['text', 'label'], inplace=True)
+        # Asegurarse de que el texto sea string
+        df['text'] = df['text'].astype(str)
+        logging.info(f"Datos cargados desde {file_path}. Filas: {len(df)}")
+        if df.empty:
+            logging.error("El archivo CSV está vacío o no contiene datos válidos después de eliminar NaNs.")
+            return None
+        return df
+    except Exception as e:
+        logging.error(f"Error cargando el archivo CSV {file_path}: {e}")
+        return None
+
+def train_model(df):
+    """Divide los datos, entrena el modelo y lo guarda."""
+    logging.info("Iniciando proceso de entrenamiento...")
+
+    # Convertir etiquetas a números y guardar mapeo
+    df['label_id'] = df['label'].astype('category').cat.codes
+    label_mapping = dict(enumerate(df['label'].astype('category').cat.categories))
+    logging.info(f"Mapeo de etiquetas a IDs: {label_mapping}")
+
+    X = df['text']
+    y = df['label_id']
+
+    # Verificar si hay suficientes datos y clases
+    if len(df) < 10: # Umbral arbitrario, ajustar si es necesario
+        logging.error(f"Muy pocos datos ({len(df)}) para entrenar un modelo de forma fiable.")
+        return None, None
+    if len(label_mapping) < 2:
+         logging.error(f"Se necesita al menos 2 clases para la clasificación, encontradas: {len(label_mapping)}")
+         return None, None
+
+
+    logging.info("Dividiendo los datos en entrenamiento, validación y prueba...")
+    try:
+        # Primera división: Entrenamiento + Validación vs. Prueba
+        X_train_val, X_test, y_train_val, y_test = train_test_split(
+            X, y,
+            test_size=TEST_SIZE,
+            random_state=RANDOM_STATE,
+            stratify=y # Importante para mantener proporción de clases
+        )
+
+        # Segunda división: Entrenamiento vs. Validación
+        # Ajustar test_size para que represente VALIDATION_SIZE del total original
+        val_size_relative = VALIDATION_SIZE / (1.0 - TEST_SIZE)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_val, y_train_val,
+            test_size=val_size_relative,
+            random_state=RANDOM_STATE,
+            stratify=y_train_val # Estratificar también aquí
+        )
+    except ValueError as e:
+         logging.error(f"Error durante la división de datos (train_test_split): {e}")
+         logging.error("Esto puede ocurrir si una clase tiene muy pocos ejemplos.")
+         logging.info(f"Distribución de clases original:\n{y.value_counts()}")
+         return None, None
+
+    logging.info(f"Tamaño Train: {len(X_train)}, Tamaño Val: {len(X_val)}, Tamaño Test: {len(X_test)}")
+    logging.info(f"Distribución de clases en Train:\n{y_train.value_counts(normalize=True)}")
+    logging.info(f"Distribución de clases en Val:\n{y_val.value_counts(normalize=True)}")
+    logging.info(f"Distribución de clases en Test:\n{y_test.value_counts(normalize=True)}")
+
+    # Guardar conjuntos de datos (opcional pero útil para reproducibilidad/evaluación separada)
+    try:
+        test_df = df.loc[X_test.index]
+        test_df.to_csv(TEST_SET_PATH, index=False, encoding='utf-8')
+        logging.info(f"Conjunto de prueba guardado en {TEST_SET_PATH}")
+
+        # Podrías guardar también train y val si lo necesitas
+        # train_df = df.loc[X_train.index]
+        # val_df = df.loc[X_val.index]
+        # train_df.to_csv(TRAIN_SET_PATH, index=False, encoding='utf-8')
+        # val_df.to_csv(VAL_SET_PATH, index=False, encoding='utf-8')
+
+    except Exception as e:
+        logging.warning(f"No se pudieron guardar los conjuntos de datos divididos: {e}")
+
+
+    # Calcular pesos de clase si las clases están desbalanceadas (opcional pero recomendado)
+    class_weights = class_weight.compute_class_weight(
+        'balanced',
+        classes=np.unique(y_train),
+        y=y_train
+    )
+    # Convertir a diccionario para LinearSVC
+    class_weights_dict = {i: weight for i, weight in enumerate(class_weights)}
+    logging.info(f"Pesos de clase calculados (para SVM): {class_weights_dict}")
+
+
+    # Crear el pipeline: Vectorizador TF-IDF + Clasificador SVM
+    logging.info("Creando el pipeline TF-IDF + LinearSVC...")
+    pipeline = Pipeline([
+        ('tfidf', TfidfVectorizer(
+            stop_words=None, # Considera añadir stopwords en español ['de', 'la', 'el', ...]
+            max_df=TFIDF_MAX_DF,
+            min_df=TFIDF_MIN_DF,
+            ngram_range=TFIDF_NGRAM_RANGE,
+            sublinear_tf=True # Suele ayudar en texto
+        )),
+        ('clf', LinearSVC(
+            C=SVM_C,
+            random_state=RANDOM_STATE,
+            class_weight=class_weights_dict, # Usar pesos de clase
+            dual="auto", # Evita warning con n_samples > n_features
+            max_iter=3000 # Aumentar si no converge
+        ))
+    ])
+
+    # Entrenar el modelo
+    logging.info("Entrenando el modelo...")
+    try:
+        pipeline.fit(X_train, y_train)
+        logging.info("Entrenamiento completado.")
+    except Exception as e:
+        logging.error(f"Error durante el entrenamiento del pipeline: {e}")
+        return None, None
+
+    # Evaluar en el conjunto de Validación
+    logging.info("\n--- Evaluación en Conjunto de Validación ---")
+    try:
+        y_pred_val = pipeline.predict(X_val)
+        target_names = [label_mapping[i] for i in sorted(label_mapping.keys())]
+        report = classification_report(y_val, y_pred_val, target_names=target_names)
+        accuracy = accuracy_score(y_val, y_pred_val)
+        print(report)
+        logging.info(f"Accuracy Validación: {accuracy:.4f}")
+    except Exception as e:
+        logging.error(f"Error durante la evaluación en el conjunto de validación: {e}")
+        # Continuar para guardar el modelo de todas formas si el entrenamiento funcionó
+
+    # Guardar el pipeline entrenado y el mapeo de etiquetas
+    logging.info("Guardando el modelo y el mapeo de etiquetas...")
+    try:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(pipeline, MODEL_PATH)
+        joblib.dump(label_mapping, MAPPING_PATH)
+        logging.info(f"Modelo guardado en: {MODEL_PATH}")
+        logging.info(f"Mapeo de etiquetas guardado en: {MAPPING_PATH}")
+    except Exception as e:
+        logging.error(f"Error guardando el modelo o el mapeo: {e}")
+        return None, None # Considerar si devolver el pipeline aunque no se guarde
+
+    return pipeline, label_mapping
+
+# --- Script Principal ---
+def main():
+    logging.info("--- Iniciando Script de Entrenamiento ---")
+    df = load_data(LABELED_DATA_PATH)
+
+    if df is not None and not df.empty:
+        pipeline, label_mapping = train_model(df)
+        if pipeline and label_mapping:
+            logging.info("--- Script de Entrenamiento Finalizado Exitosamente ---")
+        else:
+            logging.error("--- Script de Entrenamiento Finalizado con Errores ---")
+    else:
+        logging.error("No se pudieron cargar los datos. Finalizando script.")
+        logging.error("--- Script de Entrenamiento Finalizado con Errores ---")
+
+if __name__ == "__main__":
+    main()
+
+7. src/evaluation.py
+
+import pandas as pd
+from pathlib import Path
+import joblib
+import logging
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, accuracy_score
+import matplotlib.pyplot as plt
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ---
+MODEL_DIR = Path('models/tfidf_svm')
+MODEL_PATH = MODEL_DIR / 'tfidf_svm_pipeline.joblib'
+MAPPING_PATH = MODEL_DIR / 'label_mapping.joblib'
+TEST_SET_PATH = Path('data/labeled/test_set.csv') # Usamos el archivo guardado por training.py
+RESULTS_DIR = Path('results')
+CONFUSION_MATRIX_PATH = RESULTS_DIR / 'confusion_matrix_test.png'
+CLASSIFICATION_REPORT_PATH = RESULTS_DIR / 'classification_report_test.csv'
+
+# --- Funciones ---
+
+def load_model_and_mapping(model_path, mapping_path):
+    """Carga el pipeline y el mapeo de etiquetas."""
+    if not model_path.exists() or not mapping_path.exists():
+        logging.error("No se encontró el modelo entrenado o el archivo de mapeo.")
+        logging.error(f"Buscado en: {model_path.parent}")
+        logging.error("Asegúrate de haber ejecutado 'python src/training.py' primero.")
+        return None, None
+    try:
+        pipeline = joblib.load(model_path)
+        label_mapping = joblib.load(mapping_path)
+        logging.info(f"Modelo cargado desde: {model_path}")
+        logging.info(f"Mapeo de etiquetas cargado: {label_mapping}")
+        return pipeline, label_mapping
+    except Exception as e:
+        logging.error(f"Error cargando el modelo o el mapeo: {e}")
+        return None, None
+
+def load_test_data(file_path):
+    """Carga los datos de prueba."""
+    if not file_path.exists():
+        logging.error(f"El archivo del conjunto de prueba no se encuentra en: {file_path}")
+        logging.error("Asegúrate de que 'training.py' lo haya guardado correctamente.")
+        return None
+    try:
+        df = pd.read_csv(file_path)
+        df.dropna(subset=['text', 'label_id'], inplace=True) # Usa label_id que guardó training.py
+        df['text'] = df['text'].astype(str)
+        logging.info(f"Datos de prueba cargados desde {file_path}. Filas: {len(df)}")
+        if df.empty:
+             logging.error("El archivo CSV de prueba está vacío.")
+             return None
+        return df
+    except Exception as e:
+        logging.error(f"Error cargando el archivo CSV de prueba {file_path}: {e}")
+        return None
+
+def evaluate_model(pipeline, df_test, label_mapping):
+    """Evalúa el modelo en el conjunto de prueba y guarda los resultados."""
+    logging.info("Iniciando evaluación en el conjunto de prueba...")
+
+    X_test = df_test['text']
+    y_test_true = df_test['label_id'] # Usamos los IDs numéricos para métricas
+
+    if X_test.empty:
+        logging.error("No hay datos de texto en el conjunto de prueba para evaluar.")
+        return
+
+    try:
+        y_test_pred = pipeline.predict(X_test)
+    except Exception as e:
+        logging.error(f"Error durante la predicción en el conjunto de prueba: {e}")
+        return
+
+    # Obtener nombres de etiquetas en el orden correcto de los IDs
+    target_names = [label_mapping[i] for i in sorted(label_mapping.keys())]
+
+    # --- Generar y Guardar Reporte de Clasificación ---
+    logging.info("\n--- Reporte de Clasificación (Conjunto de Prueba) ---")
+    try:
+        report_str = classification_report(y_test_true, y_test_pred, target_names=target_names)
+        report_dict = classification_report(y_test_true, y_test_pred, target_names=target_names, output_dict=True)
+        accuracy = accuracy_score(y_test_true, y_test_pred)
+
+        print(report_str)
+        logging.info(f"Accuracy General (Prueba): {accuracy:.4f}")
+
+        # Guardar reporte en CSV
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        report_df = pd.DataFrame(report_dict).transpose()
+        report_df.to_csv(CLASSIFICATION_REPORT_PATH)
+        logging.info(f"Reporte de clasificación guardado en: {CLASSIFICATION_REPORT_PATH}")
+
+    except Exception as e:
+        logging.error(f"Error generando o guardando el reporte de clasificación: {e}")
+
+    # --- Generar y Guardar Matriz de Confusión ---
+    logging.info("\nGenerando Matriz de Confusión...")
+    try:
+        cm = confusion_matrix(y_test_true, y_test_pred, labels=pipeline.classes_) # Usar las clases del pipeline
+
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=target_names)
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        disp.plot(ax=ax, cmap=plt.cm.Blues, xticks_rotation='vertical')
+        plt.title('Matriz de Confusión - Conjunto de Prueba')
+        plt.tight_layout()
+
+        # Guardar la figura
+        plt.savefig(CONFUSION_MATRIX_PATH)
+        logging.info(f"Matriz de confusión guardada en: {CONFUSION_MATRIX_PATH}")
+        # plt.show() # Descomentar si quieres mostrarla interactivamente
+
+    except Exception as e:
+        logging.error(f"Error generando o guardando la matriz de confusión: {e}")
+
+# --- Script Principal ---
+def main():
+    logging.info("--- Iniciando Script de Evaluación ---")
+
+    pipeline, label_mapping = load_model_and_mapping(MODEL_PATH, MAPPING_PATH)
+    df_test = load_test_data(TEST_SET_PATH)
+
+    if pipeline and label_mapping and df_test is not None and not df_test.empty:
+        evaluate_model(pipeline, df_test, label_mapping)
+        logging.info("--- Script de Evaluación Finalizado Exitosamente ---")
+    else:
+        logging.error("No se pudo completar la evaluación debido a errores previos (modelo/datos faltantes).")
+        logging.error("--- Script de Evaluación Finalizado con Errores ---")
+
+if __name__ == "__main__":
+    main()
+
+8. src/predict.py
+¡Listo! Con estos archivos, tienes la estructura completa del proyecto y el código necesario para ejecutar la POC. Recuerda:
+ * Colocar tus PDFs en data/raw/ en las subcarpetas correctas.
+ * Instalar markitdown.
+ * Instalar las dependencias de requirements.txt.
+ * Ejecutar los scripts en orden: preprocessing.py, training.py, evaluation.py.
+ * Usar predict.py para probar con nuevos archivos (convertidos a MD).
+Analiza los resultados de evaluation.py para ver qué tal funciona el modelo inicial. ¡Mucha suerte!
