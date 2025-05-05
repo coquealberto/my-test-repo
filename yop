@@ -861,6 +861,123 @@ if __name__ == "__main__":
     main()
 
 8. src/predict.py
+
+import joblib
+from pathlib import Path
+import argparse
+import logging
+import sys
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes ---
+MODEL_DIR = Path('models/tfidf_svm')
+MODEL_PATH = MODEL_DIR / 'tfidf_svm_pipeline.joblib'
+MAPPING_PATH = MODEL_DIR / 'label_mapping.joblib'
+
+# --- Funciones ---
+
+def load_model_and_mapping(model_path, mapping_path):
+    """Carga el pipeline y el mapeo de etiquetas."""
+    if not model_path.exists() or not mapping_path.exists():
+        logging.error("No se encontró el modelo entrenado o el archivo de mapeo.")
+        logging.error(f"Buscado en: {model_path.parent}")
+        logging.error("Asegúrate de que el modelo esté entrenado ('python src/training.py').")
+        return None, None
+    try:
+        pipeline = joblib.load(model_path)
+        label_mapping = joblib.load(mapping_path)
+        logging.info(f"Modelo y mapeo cargados desde: {model_path.parent}")
+        return pipeline, label_mapping
+    except Exception as e:
+        logging.error(f"Error cargando el modelo o el mapeo: {e}")
+        return None, None
+
+def read_markdown_file(file_path):
+    """Lee el contenido de un archivo Markdown."""
+    markdown_file = Path(file_path)
+    if not markdown_file.is_file():
+        logging.error(f"El archivo de entrada no existe o no es un archivo: {file_path}")
+        return None
+
+    try:
+        # Intentar leer con varias codificaciones
+        content = None
+        encodings_to_try = ['utf-8', 'latin-1', 'cp1252']
+        for enc in encodings_to_try:
+            try:
+                with open(markdown_file, 'r', encoding=enc) as f:
+                    content = f.read()
+                logging.debug(f"Archivo {markdown_file.name} leído con encoding {enc}")
+                break
+            except UnicodeDecodeError:
+                logging.warning(f"Fallo al leer {markdown_file.name} con {enc}. Intentando siguiente.")
+            except Exception as e_read:
+                 logging.error(f"Error inesperado leyendo {markdown_file.name} con {enc}: {e_read}")
+
+        if content is None:
+            logging.error(f"No se pudo leer el archivo {markdown_file.name} con ninguna codificación.")
+            return None
+
+        # Aplicar la misma limpieza básica que en preprocessing si es necesario
+        # import re
+        # content_cleaned = re.sub(r'\s+', ' ', content).strip()
+        # return content_cleaned
+        return content # Devolver tal cual por ahora
+
+    except Exception as e:
+        logging.error(f"Error leyendo el archivo Markdown {file_path}: {e}")
+        return None
+
+def predict_label(pipeline, label_mapping, text_content):
+    """Realiza la predicción para un texto dado."""
+    if not text_content:
+        logging.error("El contenido del texto está vacío. No se puede predecir.")
+        return None
+
+    try:
+        # El pipeline espera una lista o iterable de documentos
+        predicted_id = pipeline.predict([text_content])[0]
+        predicted_label = label_mapping.get(predicted_id, "Etiqueta Desconocida")
+        return predicted_label
+    except Exception as e:
+        logging.error(f"Error durante la predicción: {e}")
+        return None
+
+# --- Script Principal ---
+def main():
+    parser = argparse.ArgumentParser(description="Clasifica un documento legal (en formato Markdown) usando el modelo entrenado.")
+    parser.add_argument("markdown_file", help="Ruta al archivo .md que se desea clasificar.")
+    args = parser.parse_args()
+
+    logging.info("--- Iniciando Script de Predicción ---")
+
+    pipeline, label_mapping = load_model_and_mapping(MODEL_PATH, MAPPING_PATH)
+    if not pipeline or not label_mapping:
+        logging.error("No se pudo cargar el modelo. Abortando.")
+        sys.exit(1) # Salir con código de error
+
+    markdown_content = read_markdown_file(args.markdown_file)
+    if not markdown_content:
+        logging.error("No se pudo leer el contenido del archivo. Abortando.")
+        sys.exit(1)
+
+    predicted_label = predict_label(pipeline, label_mapping, markdown_content)
+
+    if predicted_label:
+        print(f"\nArchivo: {args.markdown_file}")
+        print(f"Etiqueta Predicha: --> {predicted_label} <--")
+        logging.info("--- Predicción Finalizada Exitosamente ---")
+    else:
+        logging.error("No se pudo obtener una predicción.")
+        logging.error("--- Predicción Finalizada con Errores ---")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+
 ¡Listo! Con estos archivos, tienes la estructura completa del proyecto y el código necesario para ejecutar la POC. Recuerda:
  * Colocar tus PDFs en data/raw/ en las subcarpetas correctas.
  * Instalar markitdown.
