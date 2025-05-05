@@ -1,0 +1,231 @@
+¡Tienes toda la razón! Mil disculpas por el enlace incorrecto. Efectivamente, el repositorio oficial es el de Microsoft: https://github.com/microsoft/markitdown.
+He revisado el repositorio de Microsoft y, aunque sí se puede instalar como paquete Python usando pip, su diseño principal y la documentación se centran en su uso como herramienta de línea de comandos (CLI). No parece exponer una API Python simple y directa para llamar a la conversión desde un script (como markitdown.convert()).
+Por lo tanto, la forma más fiable y documentada de usarlo sigue siendo a través de subprocess, pero la gran ventaja es que ahora podemos instalar la herramienta directamente con pip, lo cual es mucho más limpio y asegura que esté disponible en el entorno virtual.
+Vamos a actualizar los archivos correspondientes:
+1. README.md (Sección de Configuración e Instalación actualizada)
+## Configuración del Entorno
+
+1.  **Clonar el Repositorio:**
+    ```bash
+    git clone <URL_DEL_REPOSITORIO>
+    cd legal_doc_classifier_poc
+    ```
+
+2.  **Crear y Activar Entorno Virtual:**
+    ```bash
+    python -m venv venv
+    # Linux / macOS
+    source venv/bin/activate
+    # Windows (cmd/powershell)
+    # venv\Scripts\activate
+    ```
+
+3.  **Instalar Dependencias (incluye Markitdown):**
+    ```bash
+    pip install -U pip
+    pip install -r requirements.txt
+    ```
+    *Nota: Esto instalará todas las bibliotecas Python necesarias y también la herramienta de línea de comandos `markitdown` (de [Microsoft Markitdown](https://github.com/microsoft/markitdown)) dentro de tu entorno virtual.*
+
+## Preparación de Datos (**¡Acción Requerida!**)
+
+1.  **Coloca tus archivos PDF** dentro de la carpeta `data/raw/`... (El resto de esta sección no cambia)
+
+2.  **Ejecuta el script de preprocesamiento:**
+    ```bash
+    python src/preprocessing.py
+    ```
+    Esto usará el comando `markitdown` (instalado vía `pip`) para convertir los PDFs a Markdown... (El resto de esta sección no cambia)
+
+El resto del README.md permanece igual.
+2. requirements.txt (Actualizado)
+pandas>=1.3.0
+scikit-learn>=1.0.0
+joblib>=1.0.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+markitdown # Añadido para instalar la herramienta CLI de Microsoft vía pip
+# jupyterlab es opcional para los notebooks
+# jupyterlab
+
+3. src/preprocessing.py (Modificaciones menores)
+La lógica principal con subprocess sigue siendo válida, ya que pip install markitdown simplemente pondrá el ejecutable markitdown disponible en el PATH del entorno virtual. Podemos simplificar un poco el manejo de errores ya que pip se encarga de la instalación.
+import os
+import subprocess
+import pandas as pd
+from pathlib import Path
+import argparse
+import logging
+import re
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ---
+LABEL_MAP = {
+    'demanda_monitorio': 'demanda monitorio',
+    'decanato_monitorio': 'decanato monitorio',
+    'admision_tramite': 'admisión a trámite',
+    'decanato_ejecutivo': 'decanato ejecutivo'
+}
+BASE_DATA_PATH = Path('data')
+RAW_FOLDER = BASE_DATA_PATH / 'raw'
+PROCESSED_FOLDER = BASE_DATA_PATH / 'processed'
+LABELED_FOLDER = BASE_DATA_PATH / 'labeled'
+OUTPUT_CSV = LABELED_FOLDER / 'labeled_documents.csv'
+
+# --- Funciones ---
+def clean_text(text):
+    """Limpia el texto de Markdown: quita saltos de línea excesivos, etc."""
+    # (Sin cambios en esta función)
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def convert_pdf_to_md(pdf_path, output_dir):
+    """Convierte un PDF a Markdown usando el comando 'markitdown' (instalado vía pip)."""
+    pdf_file = Path(pdf_path)
+    md_file = Path(output_dir) / f"{pdf_file.stem}.md"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # El comando 'markitdown' debería estar disponible si se instaló con requirements.txt
+    command = ['markitdown', str(pdf_file), '--output-dir', str(output_dir)]
+    logging.info(f"Ejecutando comando: {' '.join(command)}")
+
+    try:
+        # Ejecutar el comando. text=True y encoding='utf-8' son buenas prácticas.
+        result = subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8')
+        logging.info(f"Convertido: {pdf_file.name} -> {md_file.name}")
+        if result.stderr:
+             # Markitdown puede escribir info/warnings a stderr aunque termine bien
+             logging.warning(f"Markitdown stderr para {pdf_file.name}:\n{result.stderr}")
+        return str(md_file)
+    except subprocess.CalledProcessError as e:
+        # Este error ocurre si markitdown devuelve un código de salida distinto de 0
+        logging.error(f"Error ejecutando Markitdown para {pdf_file.name}. Código de salida: {e.returncode}")
+        logging.error(f"Stderr:\n{e.stderr}")
+        logging.error(f"Stdout:\n{e.stdout}")
+        # Podrías querer investigar por qué falló (¿PDF corrupto, protegido, problema de Markitdown?)
+        return None
+    except FileNotFoundError:
+        # Este error AHORA significaría que ALGO MUY RARO pasó, ya que pip debería haberlo instalado.
+        # O quizás el entorno virtual no está activado.
+        logging.critical("CRÍTICO: El comando 'markitdown' no se encontró, ¡incluso después de 'pip install'!")
+        logging.critical("Verifica que el entorno virtual esté activado y que 'pip install -r requirements.txt' se completó sin errores.")
+        raise # Detener la ejecución es apropiado aquí.
+    except Exception as e:
+        logging.error(f"Error inesperado durante la conversión de {pdf_file.name}: {e}")
+        return None
+
+def process_folder(raw_folder_path, processed_folder, label):
+    """Convierte todos los PDFs en una carpeta, lee el MD y asigna una etiqueta."""
+    # (Sin cambios significativos aquí, la lógica de lectura de archivos y manejo de errores sigue igual)
+    if not raw_folder_path.is_dir():
+        logging.warning(f"La carpeta de entrada no existe: {raw_folder_path}")
+        return []
+
+    data = []
+    pdf_files = list(raw_folder_path.glob('*.pdf'))
+    logging.info(f"Encontrados {len(pdf_files)} archivos PDF en {raw_folder_path}")
+
+    if not pdf_files:
+        logging.warning(f"No se encontraron archivos PDF en: {raw_folder_path}")
+        return []
+
+    for pdf_file in pdf_files:
+        md_path_str = convert_pdf_to_md(pdf_file, processed_folder)
+        if md_path_str:
+            md_path = Path(md_path_str)
+            try:
+                encodings_to_try = ['utf-8', 'latin-1', 'cp1252']
+                content = None
+                for enc in encodings_to_try:
+                    try:
+                        with open(md_path, 'r', encoding=enc) as f:
+                            content = f.read()
+                        logging.debug(f"Archivo {md_path.name} leído con encoding {enc}")
+                        break
+                    except UnicodeDecodeError:
+                        logging.warning(f"Fallo al leer {md_path.name} con encoding {enc}. Intentando siguiente...")
+                    except Exception as e_read:
+                        logging.error(f"Error inesperado leyendo {md_path.name} con encoding {enc}: {e_read}")
+
+                if content is None:
+                     logging.error(f"No se pudo leer el archivo {md_path.name} con ninguna codificación probada. Saltando archivo.")
+                     continue
+
+                content_cleaned = clean_text(content)
+                if not content_cleaned:
+                    logging.warning(f"El contenido del archivo {md_path.name} quedó vacío después de la limpieza.")
+
+                data.append({
+                    'source_pdf': pdf_file.name,
+                    'markdown_file': md_path.name,
+                    'text': content_cleaned,
+                    'label': label
+                })
+            except FileNotFoundError:
+                 # Esto no debería ocurrir si convert_pdf_to_md devolvió una ruta válida
+                logging.error(f"¡Inconsistencia! El archivo Markdown {md_path_str} fue reportado como creado pero no se encuentra.")
+            except Exception as e:
+                logging.error(f"Error procesando el archivo Markdown {md_path_str}: {e}")
+    return data
+
+# --- Script Principal ---
+def main():
+    # (Sin cambios en la función main)
+    logging.info("--- Iniciando Script de Preprocesamiento ---")
+    PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
+    LABELED_FOLDER.mkdir(parents=True, exist_ok=True)
+    all_data = []
+    found_folders = 0
+    for folder_name, label in LABEL_MAP.items():
+        raw_folder_path = RAW_FOLDER / folder_name
+        if raw_folder_path.is_dir():
+            found_folders += 1
+            logging.info(f"\nProcesando carpeta: {raw_folder_path} para etiqueta: '{label}'")
+            folder_data = process_folder(raw_folder_path, PROCESSED_FOLDER, label)
+            all_data.extend(folder_data)
+            logging.info(f"Procesados {len(folder_data)} documentos de la carpeta {folder_name}.")
+        else:
+            logging.warning(f"Carpeta no encontrada, saltando: {raw_folder_path}")
+
+    if found_folders == 0:
+        logging.error("¡Error Crítico! No se encontró ninguna de las carpetas esperadas en data/raw/.")
+        logging.error(f"Carpetas esperadas (basadas en LABEL_MAP): {list(LABEL_MAP.keys())}")
+        return
+
+    if not all_data:
+         logging.error("¡Error Crítico! No se procesó ningún documento correctamente.")
+         return
+
+    df = pd.DataFrame(all_data)
+    empty_texts = df[df['text'] == ''].shape[0]
+    if empty_texts > 0:
+        logging.warning(f"{empty_texts} documentos resultaron con texto vacío después de la limpieza.")
+
+    if df.empty:
+        logging.error("El DataFrame final está vacío. No se guardará ningún archivo CSV.")
+        return
+
+    try:
+        df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8')
+        logging.info(f"\nDatos procesados y guardados exitosamente en: {OUTPUT_CSV}")
+        logging.info(f"Total de documentos procesados: {len(df)}")
+        logging.info("Distribución de etiquetas:")
+        logging.info(f"\n{df['label'].value_counts()}")
+    except Exception as e:
+        logging.error(f"Error al guardar el archivo CSV en {OUTPUT_CSV}: {e}")
+
+    logging.info("--- Script de Preprocesamiento Finalizado ---")
+
+
+if __name__ == "__main__":
+    main()
+
+Resumen de Cambios:
+ * README.md: Corregido el enlace a Markitdown y actualizada la instrucción de instalación para usar pip install -r requirements.txt, mencionando que esto instala la herramienta CLI.
+ * requirements.txt: Añadido markitdown a la lista de dependencias.
+ * src/preprocessing.py: Mantenida la lógica de subprocess pero mejorado el mensaje de error si markitdown no se encuentra (ya que ahora debería ser instalado por pip).
+Estos cambios hacen que la configuración sea más estándar y robusta al manejar markitdown como una dependencia Python más, aunque se siga usando como un comando externo. ¡Gracias por la corrección!
