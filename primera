@@ -1,0 +1,300 @@
+¡Claro que sí! Es una excelente iniciativa desarrollar una POC para la clasificación de documentos legales. Te guiaré paso a paso para crear este primer ensayo, enfocándonos en tus necesidades actuales y preparando el terreno para la futura integración con Azure.
+Aquí tienes una guía detallada:
+Comprensión del Problema y Enfoque
+ * Objetivo POC: Clasificar documentos legales en 4 categorías específicas (demanda monitorio, decanato monitorio, admisión a trámite, decanato ejecutivo) usando Python localmente.
+ * Herramientas: Python, Markitdown, Ollama (opcional, para modelos <10B), Scikit-learn, posiblemente bibliotecas de Transformers (Hugging Face).
+ * Objetivo Final: Utilizar un servicio tipo Azure Document Intelligence Custom Classification, que entrena modelos basados en documentos etiquetados (probablemente redes neuronales que consideran tanto texto como estructura/layout).
+ * Desafío Clave POC: Demostrar la viabilidad de la clasificación automática con las herramientas disponibles y los datos iniciales.
+Fase 1: Preparación y Configuración del Entorno
+ * Estructura del Repositorio:
+   Un buen repositorio es fundamental. Te sugiero la siguiente estructura:
+   legal_doc_classifier_poc/
+│
+├── data/
+│   ├── raw/             # PDFs originales (si los puedes incluir)
+│   ├── processed/       # Archivos Markdown generados
+│   └── labeled/         # Archivos procesados con sus etiquetas (e.g., CSV, JSON)
+│
+├── notebooks/           # Jupyter notebooks para exploración y prototipado rápido
+│   └── 01_data_preprocessing.ipynb
+│   └── 02_model_training_tfidf.ipynb
+│   └── 03_model_training_transformer.ipynb # Opcional
+│   └── 04_evaluation.ipynb
+│
+├── src/                 # Código Python modularizado
+│   ├── __init__.py
+│   ├── preprocessing.py # Funciones para convertir PDF a MD y limpiar texto
+│   ├── training.py      # Scripts/funciones para entrenar modelos
+│   ├── evaluation.py    # Funciones para evaluar modelos
+│   └── predict.py       # Script para hacer predicciones con un modelo entrenado
+│
+├── models/              # Modelos entrenados guardados
+│   └── tfidf_svm/
+│   └── distilbert_finetuned/ # Opcional
+│
+├── results/             # Resultados de evaluación (métricas, matrices de confusión)
+│
+├── .gitignore           # Para excluir archivos (datos sensibles, virtual envs, etc.)
+├── requirements.txt     # Dependencias del proyecto
+└── README.md            # Descripción del proyecto, instrucciones
+
+ * Entorno Virtual y Dependencias:
+   Es crucial usar un entorno virtual para aislar las dependencias.
+   python -m venv venv
+source venv/bin/activate  # En Windows: venv\Scripts\activate
+pip install -U pip
+pip install markitdown pandas scikit-learn jupyterlab matplotlib seaborn # Básicas
+# Opcional para Transformers:
+# pip install transformers[torch] torch # O [tensorflow] y tensorflow
+# Opcional si quieres interactuar con Ollama via API:
+# pip install requests
+
+   Crea un archivo requirements.txt:
+   # requirements.txt
+markitdown
+pandas
+scikit-learn
+jupyterlab
+matplotlib
+seaborn
+# Opcional:
+# transformers
+# torch
+# requests
+
+ * Recopilación y Etiquetado de Datos:
+   * ¡Este es el paso más CRÍTICO! Necesitas un conjunto de documentos PDF ya clasificados en las 4 categorías: demanda monitorio, decanato monitorio, admisión a trámite, decanato ejecutivo.
+   * Cuantos más ejemplos tengas por categoría (idealmente decenas o cientos para empezar), mejor funcionará el modelo.
+   * Organiza los PDFs iniciales, quizás en subcarpetas por etiqueta dentro de data/raw/ si eso facilita el siguiente paso.
+ * Preprocesamiento: PDF a Markdown:
+   * Utiliza markitdown para convertir tus PDFs a Markdown. Crea un script o un notebook (notebooks/01_data_preprocessing.ipynb o src/preprocessing.py).
+   * Consideraciones con Markitdown:
+     * La calidad dependerá de si los PDFs son nativos (texto seleccionable) o escaneados (necesitan OCR). Markitdown intentará manejar ambos.
+     * Parte de la estructura visual se perderá en la conversión a Markdown. Esto es una diferencia clave respecto a Azure Document Intelligence, que sí analiza el layout. Para esta POC local basada en texto, es aceptable.
+     * Revisa la salida de algunos archivos para asegurarte de que el texto relevante se extrae correctamente.
+   * Ejemplo de Script (conceptual en src/preprocessing.py):
+     import os
+import subprocess
+import pandas as pd
+from pathlib import Path
+
+def convert_pdf_to_md(pdf_path, output_dir):
+    """Convierte un PDF a Markdown usando markitdown CLI."""
+    pdf_file = Path(pdf_path)
+    md_file = Path(output_dir) / f"{pdf_file.stem}.md"
+    try:
+        # Asegúrate de que markitdown esté en el PATH o proporciona la ruta completa
+        subprocess.run(['markitdown', str(pdf_file), '--output-dir', str(output_dir)], check=True, capture_output=True)
+        print(f"Convertido: {pdf_file.name} -> {md_file.name}")
+        return str(md_file)
+    except subprocess.CalledProcessError as e:
+        print(f"Error convirtiendo {pdf_file.name}: {e}")
+        print(f"Stderr: {e.stderr.decode()}")
+        return None
+    except FileNotFoundError:
+        print("Error: El comando 'markitdown' no se encontró. ¿Está instalado y en el PATH?")
+        return None
+
+def process_folder(raw_folder, processed_folder, label):
+    """Convierte todos los PDFs en una carpeta y asigna una etiqueta."""
+    os.makedirs(processed_folder, exist_ok=True)
+    data = []
+    for pdf_file in Path(raw_folder).glob('*.pdf'):
+        md_path = convert_pdf_to_md(pdf_file, processed_folder)
+        if md_path:
+            try:
+                with open(md_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                # Limpieza básica (opcional, se puede hacer después)
+                content_cleaned = ' '.join(content.split()) # Quitar saltos de línea excesivos
+                data.append({'filename': Path(md_path).name, 'text': content_cleaned, 'label': label})
+            except Exception as e:
+                print(f"Error leyendo {md_path}: {e}")
+    return data
+
+# --- Script Principal (ejemplo de uso) ---
+if __name__ == "__main__":
+    # Asume que tienes carpetas como data/raw/demanda_monitorio, data/raw/decanato_monitorio, etc.
+    labels = ['demanda monitorio', 'decanato monitorio', 'admisión a trámite', 'decanato ejecutivo']
+    base_raw_path = Path('data/raw')
+    base_processed_path = Path('data/processed')
+    all_data = []
+
+    # Mapeo de nombres de carpeta a etiquetas (ajusta según tu estructura)
+    label_map = {
+        'demanda_monitorio': 'demanda monitorio',
+        'decanato_monitorio': 'decanato monitorio',
+        'admision_tramite': 'admisión a trámite', # Ojo con nombres de archivo/carpeta
+        'decanato_ejecutivo': 'decanato ejecutivo'
+    }
+
+    for folder_name, label in label_map.items():
+        raw_folder_path = base_raw_path / folder_name
+        if raw_folder_path.is_dir():
+             # Guardar Markdowns en una carpeta general processed/ o subcarpetas
+            processed_output_dir = base_processed_path # O base_processed_path / folder_name
+            print(f"\nProcesando carpeta: {raw_folder_path} para etiqueta: {label}")
+            folder_data = process_folder(raw_folder_path, processed_output_dir, label)
+            all_data.extend(folder_data)
+        else:
+            print(f"Advertencia: Carpeta no encontrada - {raw_folder_path}")
+
+
+    # Crear un DataFrame y guardarlo
+    df = pd.DataFrame(all_data)
+    output_csv = Path('data/labeled/labeled_documents.csv')
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_csv, index=False, encoding='utf-8')
+    print(f"\nDatos procesados y guardados en: {output_csv}")
+    print(df.info())
+    print(df['label'].value_counts()) # Verificar balance de clases
+
+Fase 2: Selección e Implementación del Modelo
+Tienes varias opciones para la POC local:
+ * Opción A: Enfoque Clásico (Recomendado para empezar)
+   * Técnica: TF-IDF (Term Frequency-Inverse Document Frequency) para vectorizar el texto + Clasificador simple (ej. Logistic Regression, SVM, Naive Bayes).
+   * Pros: Rápido de implementar y entrenar, buen baseline, interpretable (puedes ver qué palabras son importantes), no requiere GPU potente.
+   * Contras: No captura relaciones semánticas complejas ni el orden de las palabras tan bien como los transformers.
+   * Implementación: Usando scikit-learn.
+ * Opción B: Transformers (Más avanzado)
+   * Técnica: Usar un modelo pre-entrenado (como DistilBERT, BETO - BERT en español, o mBERT) y hacer fine-tuning en tu tarea de clasificación.
+   * Pros: Estado del arte en muchas tareas de NLP, captura mejor el contexto y la semántica.
+   * Contras: Más complejo de implementar, requiere más recursos computacionales (GPU recomendable para fine-tuning, aunque DistilBERT es relativamente ligero), modelos más grandes. Podría estar al límite o fuera del alcance de Ollama si hablamos de fine-tuning local, pero puedes usar modelos pre-entrenados para feature extraction o clasificación directa si están disponibles en formatos compatibles (como los de Hugging Face).
+   * Implementación: Usando la biblioteca transformers de Hugging Face.
+ * Opción C: LLM con Ollama (Experimental para clasificación)
+   * Técnica: Usar un modelo generativo (ej. Llama, Mistral) a través de Ollama. Puedes intentar clasificación zero-shot (dándole el texto y las 4 etiquetas posibles en el prompt) o few-shot (dándole algunos ejemplos en el prompt).
+   * Pros: No requiere entrenamiento específico (fine-tuning), puede aprovechar el conocimiento general del LLM. Fácil de probar interactivamente.
+   * Contras:
+     * La precisión puede ser variable y sensible al prompting.
+     * Menos control sobre el proceso de clasificación que un modelo entrenado específicamente.
+     * Puede ser más lento para inferencia en batch.
+     * No es el enfoque estándar para construir un clasificador robusto y dedicado, aunque puede funcionar sorprendentemente bien a veces.
+     * El fine-tuning de modelos LLM localmente es computacionalmente muy intensivo, probablemente más allá de lo que buscas para esta POC inicial.
+   * Implementación: Diseñar prompts y enviar peticiones a la API de Ollama (si la expones localmente).
+Recomendación para la POC: Empieza con la Opción A (TF-IDF + Clasificador). Es la más rápida para obtener un baseline funcional. Si los resultados no son suficientes o quieres explorar algo más potente, pasa a la Opción B (Transformers), usando un modelo relativamente pequeño como DistilBERT o BETO. Deja la Opción C (Ollama) como un experimento paralelo si tienes curiosidad, pero no la bases como tu solución principal para la POC de clasificación robusta.
+Fase 3: Entrenamiento
+ * División de Datos: Divide tu labeled_documents.csv en conjuntos de entrenamiento, validación y prueba (ej. 70% / 15% / 15%). El conjunto de validación se usa para ajustar hiperparámetros y el de prueba para la evaluación final imparcial.
+   # En tu notebook o script de entrenamiento
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+df = pd.read_csv('data/labeled/labeled_documents.csv')
+
+# Asegúrate de que no haya NaN en texto o etiquetas
+df.dropna(subset=['text', 'label'], inplace=True)
+# Convertir etiquetas a números si es necesario para algunos modelos
+df['label_id'] = df['label'].astype('category').cat.codes
+label_mapping = dict(enumerate(df['label'].astype('category').cat.categories)) # Guardar mapeo
+
+X = df['text']
+y = df['label_id'] # O df['label'] si el modelo acepta strings
+
+# Primera división: Entrenamiento + Validación vs. Prueba
+X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+
+# Segunda división: Entrenamiento vs. Validación
+X_train, X_val, y_train, y_val = train_test_split(X_train_val, y_train_val, test_size=0.1765, # Aproximadamente 15% del total original
+                                                  random_state=42, stratify=y_train_val)
+
+print(f"Tamaño Train: {len(X_train)}")
+print(f"Tamaño Val: {len(X_val)}")
+print(f"Tamaño Test: {len(X_test)}")
+
+ * Entrenamiento (Ejemplo Opción A: TF-IDF + SVM):
+   # En tu notebook o script de entrenamiento (continuación)
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report, accuracy_score
+
+# Crear un pipeline: Vectorizador + Clasificador
+pipeline_svm = Pipeline([
+    ('tfidf', TfidfVectorizer(stop_words=None, # Puedes añadir stopwords en español: ['de', 'la', 'el', ...] o usar una lista predefinida
+                              max_df=0.95, min_df=2, ngram_range=(1, 2))), # Ajusta hiperparámetros
+    ('clf', LinearSVC(C=1.0, random_state=42, dual="auto")) # Ajusta hiperparámetros (e.g., C)
+])
+
+# Entrenar el modelo
+print("Entrenando modelo SVM con TF-IDF...")
+pipeline_svm.fit(X_train, y_train)
+print("Entrenamiento completado.")
+
+# Evaluar en el conjunto de Validación (para ajustar hiperparámetros si es necesario)
+print("\nEvaluación en conjunto de Validación:")
+y_pred_val = pipeline_svm.predict(X_val)
+print(classification_report(y_val, y_pred_val, target_names=label_mapping.values()))
+print(f"Accuracy Validación: {accuracy_score(y_val, y_pred_val):.4f}")
+
+# Guardar el modelo entrenado (ejemplo)
+import joblib
+model_dir = Path('models/tfidf_svm')
+model_dir.mkdir(parents=True, exist_ok=True)
+joblib.dump(pipeline_svm, model_dir / 'tfidf_svm_pipeline.joblib')
+joblib.dump(label_mapping, model_dir / 'label_mapping.joblib')
+print(f"Modelo guardado en {model_dir}")
+
+Fase 4: Evaluación y Validación
+ * Métricas Clave:
+   * Accuracy: Porcentaje general de predicciones correctas. Puede ser engañoso si las clases están desbalanceadas.
+   * Precision (Precisión): De todas las veces que el modelo predijo una etiqueta X, ¿cuántas veces acertó? (TP / (TP + FP)). Importante si el coste de un Falso Positivo es alto.
+   * Recall (Sensibilidad): De todas las instancias reales de la etiqueta X, ¿cuántas identificó correctamente el modelo? (TP / (TP + FN)). Importante si el coste de un Falso Negativo es alto.
+   * F1-Score: Media armónica de Precision y Recall. Buen indicador general, especialmente con clases desbalanceadas.
+   * Confusion Matrix (Matriz de Confusión): Tabla que muestra cuántas veces se predijo cada clase vs. la clase real. Muy útil para ver dónde se equivoca el modelo.
+ * Evaluación Final (Conjunto de Prueba):
+   Una vez que estés satisfecho con el modelo usando el conjunto de validación (y quizás hayas ajustado hiperparámetros), realiza una evaluación final en el conjunto de prueba. ¡Este conjunto solo se usa una vez al final!
+   # En tu notebook de evaluación o script
+import joblib
+import pandas as pd
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# Cargar datos de prueba (necesitarías haber guardado X_test, y_test o cargarlos)
+# Supongamos que y_test y X_test están disponibles
+
+# Cargar el modelo y el mapeo
+model_path = Path('models/tfidf_svm/tfidf_svm_pipeline.joblib')
+mapping_path = Path('models/tfidf_svm/label_mapping.joblib')
+pipeline_svm = joblib.load(model_path)
+label_mapping = joblib.load(mapping_path)
+target_names = [label_mapping[i] for i in sorted(label_mapping.keys())] # Asegurar orden correcto
+
+print("Evaluación en conjunto de Prueba:")
+y_pred_test = pipeline_svm.predict(X_test) # Usa el X_test real
+
+# Reporte de Clasificación
+print(classification_report(y_test, y_pred_test, target_names=target_names))
+
+# Matriz de Confusión
+cm = confusion_matrix(y_test, y_pred_test)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=target_names)
+
+fig, ax = plt.subplots(figsize=(8, 6))
+disp.plot(ax=ax, cmap=plt.cm.Blues, xticks_rotation='vertical')
+plt.title('Matriz de Confusión - Conjunto de Prueba')
+plt.tight_layout()
+# Guardar la imagen
+results_dir = Path('results')
+results_dir.mkdir(exist_ok=True)
+plt.savefig(results_dir / 'confusion_matrix_test.png')
+print(f"Matriz de confusión guardada en {results_dir / 'confusion_matrix_test.png'}")
+plt.show()
+
+# Guardar métricas si es necesario
+report_dict = classification_report(y_test, y_pred_test, target_names=target_names, output_dict=True)
+report_df = pd.DataFrame(report_dict).transpose()
+report_df.to_csv(results_dir / 'classification_report_test.csv')
+print(f"Reporte de clasificación guardado en {results_dir / 'classification_report_test.csv'}")
+
+Fase 5: Iteración y Próximos Pasos
+ * Análisis de Resultados: Revisa la matriz de confusión. ¿Qué clases se confunden entre sí? ¿Hay clases con bajo Recall o Precision? Esto te dará pistas sobre dónde mejorar (¿más datos para esas clases? ¿mejor preprocesamiento? ¿un modelo más potente?).
+ * Iteración: Prueba diferentes clasificadores (Naive Bayes, Random Forest), ajusta los hiperparámetros del TF-IDF (stopwords, n-grams, min/max_df), o considera probar la Opción B (Transformers) si los resultados no son suficientes.
+ * Consideraciones para Azure:
+   * Esta POC te dará una idea de la complejidad de la tarea y la calidad de tus datos/etiquetas.
+   * Azure Document Intelligence Custom Classification probablemente usará modelos más sofisticados que analizan tanto texto como layout (posición de elementos, tablas, firmas). El entrenamiento en Azure será diferente (subes documentos y etiquetas a su plataforma).
+   * Sin embargo, haber hecho esta POC te ayuda a:
+     * Tener un conjunto de datos limpio y etiquetado.
+     * Tener un baseline de rendimiento con modelos basados solo en texto.
+     * Entender las dificultades específicas de tus tipos de documentos.
+ * Escalado a 70 Etiquetas: Escalar requerirá significativamente más datos etiquetados para cada una de las 70 categorías. La complejidad del modelo podría necesitar aumentar. Los enfoques basados en Transformers suelen escalar mejor a un gran número de etiquetas que los modelos clásicos si hay suficientes datos.
+¡Espero que esta guía detallada te sea de gran ayuda para arrancar tu POC! No dudes en preguntar si tienes dudas en alguna de las fases. ¡Mucho éxito con tu proyecto!
