@@ -1,0 +1,358 @@
+¡Excelente idea! Filtrar páginas irrelevantes antes de la extracción de texto es una muy buena práctica para reducir el ruido y mejorar potencialmente la calidad de la clasificación. Tu planteamiento de usar pypdf para crear un PDF temporal sin esas páginas y luego procesarlo con markitdown es perfectamente válido y te permite seguir usando markitdown para la extracción principal.
+Aquí te muestro cómo integrar esto en el script src/preprocessing.py y las actualizaciones necesarias:
+1. Actualizar requirements.txt
+Añade pypdf:
+pandas>=1.3.0
+scikit-learn>=1.0.0
+joblib>=1.0.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+markitdown
+pypdf>=4.0.0 # Añadido para manipulación de PDF
+# jupyterlab es opcional para los notebooks
+# jupyterlab
+
+No olvides ejecutar pip install -r requirements.txt después de guardar los cambios.
+2. Actualizar .gitignore
+Añade una línea para ignorar la carpeta temporal donde guardaremos los PDFs modificados:
+# ... (otras reglas) ...
+
+# Archivos específicos del proyecto
+/data/raw/
+/data/processed/
+/data/labeled/*.csv
+/models/
+/results/*.csv
+/results/*.png
+*.joblib
+data/processed/temp/ # Ignorar carpeta de PDFs temporales
+
+3. Modificar src/preprocessing.py
+import os
+import subprocess
+import pandas as pd
+from pathlib import Path
+import argparse
+import logging
+import re
+from pypdf import PdfReader, PdfWriter # Importar pypdf
+import shutil # Para manejo de archivos/carpetas temporales
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ---
+LABEL_MAP = {
+    'demanda_monitorio': 'demanda monitorio',
+    'decanato_monitorio': 'decanato monitorio',
+    'admision_tramite': 'admisión a trámite',
+    'decanato_ejecutivo': 'decanato ejecutivo'
+}
+BASE_DATA_PATH = Path('data')
+RAW_FOLDER = BASE_DATA_PATH / 'raw'
+PROCESSED_FOLDER = BASE_DATA_PATH / 'processed'
+# Directorio para PDFs temporales (sin las páginas de LexNET)
+TEMP_PDF_FOLDER = PROCESSED_FOLDER / 'temp'
+LABELED_FOLDER = BASE_DATA_PATH / 'labeled'
+OUTPUT_CSV = LABELED_FOLDER / 'labeled_documents.csv'
+
+# Literal a buscar para eliminar página (ajusta si es necesario, ej. case-insensitive)
+LEXNET_MARKER = "Mensaje LexNET -"
+# Considerar hacerlo case-insensitive:
+# LEXNET_MARKER_LOWER = "mensaje lexnet -"
+
+# --- Funciones ---
+
+def clean_text(text):
+    # (Sin cambios)
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def remove_lexnet_pages(input_pdf_path, output_pdf_path):
+    """
+    Lee un PDF, elimina las páginas que contienen LEXNET_MARKER y guarda
+    el resultado en output_pdf_path.
+    Devuelve True si se procesó (incluso si no se eliminó ninguna página),
+    False si hubo un error irrecuperable.
+    """
+    try:
+        reader = PdfReader(input_pdf_path)
+        writer = PdfWriter()
+        pages_removed_count = 0
+
+        for i, page in enumerate(reader.pages):
+            try:
+                text = page.extract_text()
+                # Comprobación (Case-sensitive por defecto)
+                if text and LEXNET_MARKER in text:
+                # Alternativa Case-insensitive:
+                # if text and LEXNET_MARKER_LOWER in text.lower():
+                    logging.info(f"  -> Eliminando página {i+1} de '{input_pdf_path.name}' (contiene '{LEXNET_MARKER}')")
+                    pages_removed_count += 1
+                else:
+                    # Añadir página si no contiene el marcador o no se pudo extraer texto
+                    writer.add_page(page)
+            except Exception as e_extract:
+                # Error al extraer texto de UNA página, podría ser encriptada, imagen, etc.
+                # Decisión: Incluir la página si no podemos leerla para no perder contenido válido.
+                logging.warning(f"No se pudo extraer texto de la página {i+1} de '{input_pdf_path.name}'. Incluyendo página. Error: {e_extract}")
+                writer.add_page(page)
+
+        # Si no se eliminó ninguna página Y el PDF solo tenía 1 página,
+        # podríamos optimizar no escribiendo un nuevo archivo, pero por simplicidad,
+        # siempre escribimos el resultado (podría haber otros cambios si se añade más lógica).
+        if len(writer.pages) == 0:
+             logging.warning(f"¡El PDF '{input_pdf_path.name}' quedó vacío después de eliminar páginas! No se generará archivo temporal.")
+             # Asegurarse de que el archivo de salida no exista si estaba de una ejecución anterior
+             output_pdf_path.unlink(missing_ok=True)
+             return False # Indicar fallo porque el resultado está vacío
+
+        # Guardar el PDF resultante (incluso si es idéntico al original)
+        output_pdf_path.parent.mkdir(parents=True, exist_ok=True) # Asegurar que exista temp/
+        with open(output_pdf_path, "wb") as f_out:
+            writer.write(f_out)
+
+        if pages_removed_count > 0:
+             logging.info(f"Se guardó el PDF temporal sin {pages_removed_count} página(s) en: {output_pdf_path}")
+        else:
+             logging.info(f"No se eliminaron páginas de LexNET en '{input_pdf_path.name}'. PDF temporal generado: {output_pdf_path}")
+
+        return True # Indicar éxito
+
+    except Exception as e:
+        logging.error(f"Error procesando PDF con pypdf '{input_pdf_path.name}': {e}")
+        # Asegurarse de que el archivo de salida no exista si falla a medio camino
+        output_pdf_path.unlink(missing_ok=True)
+        return False # Indicar fallo
+
+def convert_pdf_to_md(pdf_path, output_dir, desired_md_stem):
+    """
+    Convierte un PDF (posiblemente temporal) a Markdown usando 'markitdown'.
+    El archivo .md resultante tendrá el nombre basado en desired_md_stem.
+    """
+    pdf_file = Path(pdf_path)
+    # Nombre final del archivo Markdown basado en el PDF original
+    md_file_final_path = Path(output_dir) / f"{desired_md_stem}.md"
+    # Nombre temporal que markitdown podría usar si se basa en el pdf_path
+    md_file_temp_path = Path(output_dir) / f"{pdf_file.stem}.md"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = ['markitdown', str(pdf_file), '--output-dir', str(output_dir)]
+    logging.info(f"Ejecutando comando: {' '.join(command)}")
+
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8')
+        logging.info(f"Markitdown convirtió: {pdf_file.name} -> {md_file_temp_path.name}")
+        if result.stderr:
+             logging.warning(f"Markitdown stderr para {pdf_file.name}:\n{result.stderr}")
+
+        # Renombrar el archivo .md si su nombre se basó en el PDF temporal
+        if md_file_temp_path != md_file_final_path:
+            if md_file_temp_path.exists():
+                shutil.move(str(md_file_temp_path), str(md_file_final_path))
+                logging.info(f"Archivo renombrado a: {md_file_final_path.name}")
+            else:
+                logging.warning(f"Markitdown finalizó pero no se encontró el archivo esperado: {md_file_temp_path}")
+                # Podría ser que markitdown usara otro nombre? O falló silenciosamente?
+                # Por ahora, asumimos que si check=True pasó, el archivo debería estar.
+                # Si esto falla, se necesitaría investigar la salida de markitdown.
+
+        return str(md_file_final_path) # Devolver la ruta final del .md
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error ejecutando Markitdown para {pdf_file.name}. Código de salida: {e.returncode}")
+        logging.error(f"Stderr:\n{e.stderr}")
+        return None
+    except FileNotFoundError:
+        logging.critical("CRÍTICO: El comando 'markitdown' no se encontró.")
+        raise
+    except Exception as e:
+        logging.error(f"Error inesperado durante la conversión con Markitdown de {pdf_file.name}: {e}")
+        return None
+
+def process_folder(raw_folder_path, processed_folder, temp_pdf_folder, label):
+    """
+    Procesa PDFs: elimina páginas LexNET (temporal), convierte a MD, lee y asigna etiqueta.
+    """
+    if not raw_folder_path.is_dir():
+        logging.warning(f"La carpeta de entrada no existe: {raw_folder_path}")
+        return []
+
+    data = []
+    pdf_files = list(raw_folder_path.glob('*.pdf'))
+    logging.info(f"Encontrados {len(pdf_files)} archivos PDF en {raw_folder_path}")
+
+    if not pdf_files:
+        logging.warning(f"No se encontraron archivos PDF en: {raw_folder_path}")
+        return []
+
+    temp_pdf_folder.mkdir(parents=True, exist_ok=True) # Asegura que exista temp/
+
+    for pdf_file in pdf_files:
+        logging.info(f"Procesando archivo: {pdf_file.name}")
+        original_stem = pdf_file.stem # Guardar el nombre base original
+        # Ruta para el PDF temporal (sin páginas LexNET)
+        temp_pdf_path = temp_pdf_folder / f"{original_stem}_temp.pdf"
+
+        # Paso 1: Eliminar páginas con pypdf
+        success_pypdf = remove_lexnet_pages(pdf_file, temp_pdf_path)
+
+        pdf_to_convert = None
+        if success_pypdf and temp_pdf_path.exists():
+            # Usar el PDF temporal si se creó correctamente
+            pdf_to_convert = temp_pdf_path
+            logging.info(f"Usando PDF temporal '{temp_pdf_path.name}' para Markitdown.")
+        elif success_pypdf and not temp_pdf_path.exists():
+             # pypdf terminó 'bien' pero el archivo resultado estaba vacío
+             logging.warning(f"Saltando Markitdown para '{pdf_file.name}' porque el PDF resultante tras quitar páginas estaba vacío.")
+             continue # Pasar al siguiente archivo PDF
+        else:
+            # Falló pypdf o decidió no escribir archivo (ej. error grave)
+            # Decisión: Intentar con el PDF original como fallback? O saltar?
+            # Por ahora, saltamos para evitar procesar PDFs con páginas no deseadas si pypdf falló.
+            logging.error(f"No se pudo pre-procesar '{pdf_file.name}' con pypdf. Saltando conversión a Markitdown.")
+            # Limpiar el temporal por si acaso quedó a medias
+            temp_pdf_path.unlink(missing_ok=True)
+            continue # Pasar al siguiente archivo PDF
+
+        # Paso 2: Convertir el PDF seleccionado a Markdown
+        md_final_path_str = convert_pdf_to_md(pdf_to_convert, processed_folder, original_stem)
+
+        # Limpiar el PDF temporal SIEMPRE después de intentar la conversión
+        # Haya tenido éxito o no convert_pdf_to_md
+        if pdf_to_convert == temp_pdf_path:
+            try:
+                temp_pdf_path.unlink()
+                logging.info(f"PDF temporal eliminado: {temp_pdf_path.name}")
+            except OSError as e_del:
+                logging.warning(f"No se pudo eliminar el PDF temporal {temp_pdf_path.name}: {e_del}")
+
+        # Paso 3: Leer el Markdown resultante y añadir a los datos
+        if md_final_path_str:
+            md_path = Path(md_final_path_str)
+            try:
+                # (Lógica de lectura de MD sin cambios)
+                encodings_to_try = ['utf-8', 'latin-1', 'cp1252']
+                content = None
+                for enc in encodings_to_try:
+                    try:
+                        with open(md_path, 'r', encoding=enc) as f:
+                            content = f.read()
+                        logging.debug(f"Archivo {md_path.name} leído con encoding {enc}")
+                        break
+                    except UnicodeDecodeError:
+                        logging.warning(f"Fallo al leer {md_path.name} con encoding {enc}. Intentando siguiente...")
+                    except Exception as e_read:
+                        logging.error(f"Error inesperado leyendo {md_path.name} con encoding {enc}: {e_read}")
+
+                if content is None:
+                     logging.error(f"No se pudo leer el archivo {md_path.name} con ninguna codificación probada. Saltando archivo.")
+                     continue
+
+                content_cleaned = clean_text(content)
+                if not content_cleaned:
+                    logging.warning(f"El contenido del archivo {md_path.name} quedó vacío después de la limpieza.")
+
+                data.append({
+                    'source_pdf': pdf_file.name, # Referencia al original
+                    'markdown_file': md_path.name, # Nombre del MD final
+                    'text': content_cleaned,
+                    'label': label
+                })
+            except FileNotFoundError:
+                logging.error(f"¡Inconsistencia! Markitdown reportó éxito pero no se encuentra {md_final_path_str}")
+            except Exception as e:
+                logging.error(f"Error procesando el archivo Markdown {md_final_path_str}: {e}")
+        else:
+             logging.warning(f"La conversión a Markitdown falló para el PDF procesado de: {pdf_file.name}")
+
+    return data
+
+# --- Script Principal ---
+def main():
+    logging.info("--- Iniciando Script de Preprocesamiento (con filtro LexNET) ---")
+    # Crear directorios de salida principales si no existen
+    PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
+    LABELED_FOLDER.mkdir(parents=True, exist_ok=True)
+    # Limpiar/crear carpeta temporal de PDFs
+    if TEMP_PDF_FOLDER.exists():
+        logging.info(f"Limpiando directorio temporal de PDFs: {TEMP_PDF_FOLDER}")
+        shutil.rmtree(TEMP_PDF_FOLDER)
+    TEMP_PDF_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    all_data = []
+    found_folders = 0
+    for folder_name, label in LABEL_MAP.items():
+        raw_folder_path = RAW_FOLDER / folder_name
+        if raw_folder_path.is_dir():
+            found_folders += 1
+            logging.info(f"\nProcesando carpeta: {raw_folder_path} para etiqueta: '{label}'")
+            # Pasar la ruta a la carpeta temporal
+            folder_data = process_folder(raw_folder_path, PROCESSED_FOLDER, TEMP_PDF_FOLDER, label)
+            all_data.extend(folder_data)
+            logging.info(f"Procesados {len(folder_data)} documentos de la carpeta {folder_name}.")
+        else:
+            logging.warning(f"Carpeta no encontrada, saltando: {raw_folder_path}")
+
+    # (Resto de la función main sin cambios: comprobaciones, guardado de CSV)
+    if found_folders == 0:
+        logging.error("¡Error Crítico! No se encontró ninguna de las carpetas esperadas en data/raw/.")
+        return
+
+    if not all_data:
+         logging.error("¡Error Crítico! No se procesó ningún documento correctamente.")
+         return
+
+    df = pd.DataFrame(all_data)
+    empty_texts = df[df['text'] == ''].shape[0]
+    if empty_texts > 0:
+        logging.warning(f"{empty_texts} documentos resultaron con texto vacío después de la limpieza.")
+
+    if df.empty:
+        logging.error("El DataFrame final está vacío. No se guardará ningún archivo CSV.")
+        return
+
+    try:
+        df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8')
+        logging.info(f"\nDatos procesados y guardados exitosamente en: {OUTPUT_CSV}")
+        logging.info(f"Total de documentos procesados: {len(df)}")
+        logging.info("Distribución de etiquetas:")
+        logging.info(f"\n{df['label'].value_counts()}")
+    except Exception as e:
+        logging.error(f"Error al guardar el archivo CSV en {OUTPUT_CSV}: {e}")
+
+    logging.info("--- Script de Preprocesamiento Finalizado ---")
+
+
+if __name__ == "__main__":
+    main()
+
+Cambios Clave Realizados en src/preprocessing.py:
+ * Importaciones: Añadido pypdf y shutil.
+ * Constante TEMP_PDF_FOLDER: Definida para guardar los PDFs modificados.
+ * Constante LEXNET_MARKER: Define el texto a buscar para eliminar la página.
+ * Nueva Función remove_lexnet_pages:
+   * Usa PdfReader y PdfWriter.
+   * Itera por las páginas, extrae texto (page.extract_text()).
+   * Busca LEXNET_MARKER.
+   * Añade páginas al writer solo si NO contienen el marcador.
+   * Maneja errores de extracción de texto en páginas individuales (incluyéndolas si no se pueden leer).
+   * Maneja el caso de que el PDF resultante quede vacío.
+   * Guarda el resultado en la ruta temporal.
+   * Devuelve True o False indicando éxito/fracaso.
+ * Modificada convert_pdf_to_md:
+   * Acepta un desired_md_stem para nombrar correctamente el archivo .md final.
+   * Renombra el archivo .md si markitdown lo creó basándose en el nombre del PDF temporal.
+ * Modificada process_folder:
+   * Crea la ruta al PDF temporal.
+   * Llama a remove_lexnet_pages.
+   * Decide qué PDF pasar a convert_pdf_to_md (el temporal si se creó, o ninguno si pypdf falló).
+   * Llama a convert_pdf_to_md con la ruta del PDF a convertir y el original_stem.
+   * Importante: Elimina el archivo PDF temporal (temp_pdf_path.unlink()) después de intentar la conversión a MD, para no acumular archivos.
+   * La lógica de leer el MD resultante y añadir a data permanece similar.
+ * Modificada main:
+   * Asegura que la carpeta TEMP_PDF_FOLDER se limpie al inicio y se cree.
+   * Pasa TEMP_PDF_FOLDER a process_folder.
+Ahora, al ejecutar python src/preprocessing.py, primero intentará crear una versión limpia de cada PDF en data/processed/temp/, luego ejecutará markitdown sobre esa versión limpia y finalmente eliminará el PDF temporal, dejando solo el .md final en data/processed/.
