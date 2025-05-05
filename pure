@@ -1,0 +1,11 @@
+Estoy trabajando en un proyecto de clasificación de documentos legales en Python para mi empresa y necesito tu ayuda detallada para desarrollar una prueba de concepto (POC). Aunque en el futuro planeo utilizar alrededor de 70 etiquetas, en esta etapa inicial nos enfocaremos en solo 5. Estoy considerando utilizar un modelo de Azure que permita el entrenamiento con documentos etiquetados.
+
+Mi objetivo final es implementar un servicio de clasificación de documentos de Azure, específicamente algo como Document Intelligence, donde se proporcionan documentos con sus etiquetas correspondientes para entrenar un modelo (no estoy seguro del tipo de modelo que utilizan).
+
+Cuento con una máquina de laboratorio para experimentar con inteligencia artificial y redes neuronales, donde puedo realizar pruebas. Actualmente tengo instalado Ollama y puedo implementar modelos que no sean demasiado pesados (hasta 10 mil millones de parámetros). No estoy seguro si es más efectivo utilizar un modelo de IA generativa o algún otro tipo de red.
+
+Me gustaría que me guiaras en la realización de un primer ensayo, que incluya el proceso de entrenamiento, pruebas y validación. Además, necesito tu apoyo para construir todo el repositorio necesario para la POC.
+
+Planeo utilizar la biblioteca Markitdown para convertir los archivos PDF a formato Markdown.
+
+Las etiquetas potenciales son las siguientes, pero para esta primera POC solo utilizaremos: demanda monitorio, decanato monitorio, admisión a trámite y decanato ejecutivo.
