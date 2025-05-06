@@ -1,0 +1,452 @@
+Okay, aquí tienes las porciones de código específicas que necesitas modificar en cada archivo, siguiendo el plan de guardar rutas y limpiar el texto en preprocessing.py.
+1. Modificaciones en src/preprocessing.py
+# --- Añade esta función auxiliar si no la tienes, o mantenla si ya estaba ---
+def clean_text(text):
+    """Limpia el texto de Markdown: quita saltos de línea excesivos, etc."""
+    if not isinstance(text, str):
+        return ""
+    # Reemplaza múltiples espacios/saltos de línea con uno solo
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Aquí podrías añadir más limpieza en el futuro si es necesario
+    # text = text.lower() # Opcional: convertir a minúsculas
+    return text
+
+# --- Modifica la función process_folder ---
+def process_folder(raw_folder_path, processed_folder, temp_pdf_folder, label):
+    """
+    Procesa PDFs: elimina páginas LexNET (temporal), convierte a MD,
+    LIMPIA el texto del MD y lo sobrescribe, lee y asigna etiqueta guardando RUTA.
+    """
+    # ... (inicio de la función sin cambios: chequeo de carpeta, lista de PDFs, crear temp_pdf_folder) ...
+
+    for pdf_file in pdf_files:
+        logging.info(f"Procesando archivo: {pdf_file.name}")
+        original_stem = pdf_file.stem
+        temp_pdf_path = temp_pdf_folder / f"{original_stem}_temp.pdf"
+
+        # Paso 1: Eliminar páginas con pypdf (sin cambios aquí)
+        success_pypdf = remove_lexnet_pages(pdf_file, temp_pdf_path)
+
+        pdf_to_convert = None
+        if success_pypdf and temp_pdf_path.exists():
+            pdf_to_convert = temp_pdf_path
+            logging.info(f"Usando PDF temporal '{temp_pdf_path.name}' para Markitdown.")
+        elif success_pypdf and not temp_pdf_path.exists():
+             logging.warning(f"Saltando Markitdown para '{pdf_file.name}' porque el PDF resultante tras quitar páginas estaba vacío.")
+             continue
+        else:
+            logging.error(f"No se pudo pre-procesar '{pdf_file.name}' con pypdf. Saltando conversión a Markitdown.")
+            temp_pdf_path.unlink(missing_ok=True)
+            continue
+
+        # Paso 2: Convertir el PDF seleccionado a Markdown (sin cambios aquí)
+        md_final_path_str = convert_pdf_to_md(pdf_to_convert, processed_folder, original_stem)
+
+        # Limpiar el PDF temporal (sin cambios aquí)
+        if pdf_to_convert == temp_pdf_path:
+            try:
+                temp_pdf_path.unlink()
+                logging.info(f"PDF temporal eliminado: {temp_pdf_path.name}")
+            except OSError as e_del:
+                logging.warning(f"No se pudo eliminar el PDF temporal {temp_pdf_path.name}: {e_del}")
+
+        # >>> INICIO: Bloque NUEVO - Leer, Limpiar y Sobrescribir Markdown <<<
+        if md_final_path_str:
+            md_path = Path(md_final_path_str)
+            cleaned_content = None
+            original_content = None
+            try:
+                # Leer contenido original del MD generado
+                encodings_to_try = ['utf-8', 'latin-1', 'cp1252']
+                for enc in encodings_to_try:
+                    try:
+                        with open(md_path, 'r', encoding=enc) as f:
+                            original_content = f.read()
+                        logging.debug(f"Archivo {md_path.name} leído con encoding {enc}")
+                        break
+                    except UnicodeDecodeError:
+                        logging.warning(f"Fallo al leer {md_path.name} con encoding {enc}. Intentando siguiente...")
+                    except Exception as e_read:
+                         logging.error(f"Error inesperado leyendo {md_path.name} para limpieza: {e_read}")
+
+                if original_content is None:
+                     logging.error(f"No se pudo leer {md_path.name} para limpiarlo. Se usará la ruta pero el contenido podría no estar limpio.")
+                     # Decidir si continuar o no. Por ahora continuamos, pero el texto no se limpiará.
+                else:
+                    # Aplicar limpieza
+                    cleaned_content = clean_text(original_content)
+
+                    # Sobrescribir el archivo .md CON el texto limpio (usando UTF-8)
+                    try:
+                        with open(md_path, 'w', encoding='utf-8') as f:
+                            f.write(cleaned_content)
+                        logging.info(f"Archivo {md_path.name} sobrescrito con texto limpio.")
+                    except Exception as e_write:
+                         logging.error(f"Error al sobrescribir {md_path.name} con texto limpio: {e_write}")
+                         # El archivo MD existe, pero podría no estar limpio. Continuamos.
+
+                # Añadir a los datos (GUARDANDO RUTA, NO TEXTO)
+                data.append({
+                    'source_pdf': pdf_file.name,
+                    'markdown_file': md_path.name, # Nombre base del MD
+                    'markdown_path': md_final_path_str, # Ruta completa al MD
+                    # 'text': NO SE GUARDA EL TEXTO AQUÍ
+                    'label': label
+                })
+
+            except FileNotFoundError:
+                 # Este error es menos probable aquí si convert_pdf_to_md tuvo éxito, pero por si acaso
+                 logging.error(f"No se encontró el archivo {md_final_path_str} para leer/limpiar.")
+            except Exception as e:
+                logging.error(f"Error general procesando/limpiando el archivo Markdown {md_final_path_str}: {e}")
+        # >>> FIN: Bloque NUEVO - Leer, Limpiar y Sobrescribir Markdown <<<
+        else:
+             logging.warning(f"La conversión a Markitdown falló para el PDF procesado de: {pdf_file.name}")
+             # No se añade nada a 'data' si la conversión falló
+
+    return data
+
+# --- Asegúrate de que la función main guarde el CSV que ahora contiene 'markdown_path' ---
+# (La lógica de crear el DataFrame y guardarlo en main no necesita grandes cambios,
+# simplemente la columna 'text' ya no existirá y estará 'markdown_path' en su lugar)
+# Ejemplo de cómo se vería el df.info() y value_counts() al final de main:
+# ...
+# df = pd.DataFrame(all_data)
+# ... (comprobaciones de df vacío) ...
+# df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8')
+# ...
+# logging.info(f"\n{df.info()}") # Verás markdown_path en lugar de text
+# logging.info(f"\n{df['label'].value_counts()}")
+
+2. Modificaciones en src/training.py
+import pandas as pd
+from pathlib import Path
+import joblib
+import logging
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+# ... (otras importaciones) ...
+
+# Configuración del logging (sin cambios)
+# Constantes y Configuración (asegúrate que los paths sean correctos, añade markdown_path)
+LABELED_DATA_PATH = Path('data/labeled/labeled_documents.csv')
+# ... resto de constantes ...
+TEST_SET_PATH = Path('data/labeled/test_set.csv')
+
+# --- NUEVA Función Auxiliar ---
+def load_texts(paths):
+    """Lee el contenido de archivos de texto desde una lista/serie de rutas."""
+    texts = []
+    logging.info(f"Cargando texto desde {len(paths)} archivos...")
+    for file_path in paths:
+        path_obj = Path(file_path)
+        if not path_obj.is_file():
+            logging.warning(f"Archivo no encontrado al cargar texto: {file_path}. Saltando.")
+            texts.append("") # Añadir string vacío o manejar de otra forma
+            continue
+        try:
+            # Asumimos que los archivos .md fueron guardados como UTF-8 en preprocessing
+            with open(path_obj, 'r', encoding='utf-8') as f:
+                texts.append(f.read())
+        except Exception as e:
+            logging.error(f"Error leyendo archivo {file_path}: {e}")
+            texts.append("") # Añadir string vacío en caso de error
+    logging.info("Carga de textos completada.")
+    return texts
+
+# --- Modifica la función load_data ---
+def load_data(file_path):
+    """Carga los datos etiquetados (con rutas a markdown) desde un CSV."""
+    # ... (comprobación de existencia sin cambios) ...
+    try:
+        df = pd.read_csv(file_path)
+        # Asegurarse que las columnas necesarias existen y no tienen NaNs
+        required_cols = ['markdown_path', 'label']
+        df.dropna(subset=required_cols, inplace=True)
+        # Convertir a string por si acaso
+        df['markdown_path'] = df['markdown_path'].astype(str)
+        df['label'] = df['label'].astype(str) # Asumimos que train_model manejará la conversión a ID
+
+        logging.info(f"Datos cargados desde {file_path}. Filas: {len(df)}")
+        if df.empty:
+            logging.error("El archivo CSV está vacío o no contiene datos válidos.")
+            return None
+        # Verificar que la columna markdown_path existe
+        if 'markdown_path' not in df.columns:
+             logging.error(f"La columna 'markdown_path' no se encontró en {file_path}")
+             return None
+        return df
+    except Exception as e:
+        logging.error(f"Error cargando el archivo CSV {file_path}: {e}")
+        return None
+
+# --- Modifica la función train_model ---
+def train_model(df):
+    """Divide los datos (DataFrame con rutas), carga textos, entrena y guarda."""
+    logging.info("Iniciando proceso de entrenamiento...")
+
+    # Convertir etiquetas a números y guardar mapeo (sin cambios)
+    df['label_id'] = df['label'].astype('category').cat.codes
+    label_mapping = dict(enumerate(df['label'].astype('category').cat.categories))
+    logging.info(f"Mapeo de etiquetas a IDs: {label_mapping}")
+
+    # 'X' ahora representa las características indirectamente (a través de la ruta)
+    # Separamos las rutas y las etiquetas para la división
+    X_paths = df['markdown_path'] # Serie de rutas
+    y = df['label_id'] # Serie de IDs de etiqueta
+
+    # ... (comprobaciones de tamaño de df y número de clases sin cambios) ...
+
+    logging.info("Dividiendo los datos (rutas y etiquetas)...")
+    try:
+        # Dividimos las rutas y las etiquetas
+        X_train_paths, X_test_paths, y_train_val, y_test = train_test_split(
+            X_paths, y,
+            test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
+        )
+        val_size_relative = VALIDATION_SIZE / (1.0 - TEST_SIZE)
+        X_train_paths, X_val_paths, y_train, y_val = train_test_split(
+            X_train_paths, y_train_val, # Ojo, aquí usamos X_train_paths e y_train_val
+            test_size=val_size_relative, random_state=RANDOM_STATE, stratify=y_train_val
+        )
+    except ValueError as e:
+        # ... (manejo de error de división sin cambios) ...
+        return None, None
+
+    # Guardar el CONJUNTO DE PRUEBA (DataFrame con rutas)
+    try:
+        # Crear DataFrame de prueba seleccionando las filas originales por índice
+        test_indices = X_test_paths.index # Obtener índices de las rutas de prueba
+        test_df = df.loc[test_indices]
+        test_df.to_csv(TEST_SET_PATH, index=False, encoding='utf-8')
+        logging.info(f"Conjunto de prueba (con rutas) guardado en {TEST_SET_PATH}")
+    except Exception as e:
+        logging.warning(f"No se pudo guardar el conjunto de datos de prueba: {e}")
+
+    # Calcular pesos de clase (sin cambios)
+    # ... (código de class_weight) ...
+
+    # Crear el pipeline (sin cambios en la definición del pipeline)
+    # ... (definición de pipeline = Pipeline([...])) ...
+
+    # >>> CARGAR TEXTOS ANTES DE ENTRENAR <<<
+    texts_train = load_texts(X_train_paths)
+    if not texts_train: # Si la carga falló o devolvió vacío
+        logging.error("No se pudo cargar ningún texto para entrenamiento. Abortando.")
+        return None, None
+
+    # Entrenar el modelo CON LOS TEXTOS CARGADOS
+    logging.info("Entrenando el modelo...")
+    try:
+        # Usamos texts_train aquí, no X_train_paths
+        pipeline.fit(texts_train, y_train)
+        logging.info("Entrenamiento completado.")
+    except Exception as e:
+        logging.error(f"Error durante el entrenamiento del pipeline: {e}")
+        return None, None
+
+    # >>> CARGAR TEXTOS PARA VALIDACIÓN <<<
+    logging.info("\n--- Evaluación en Conjunto de Validación ---")
+    texts_val = load_texts(X_val_paths)
+    if not texts_val:
+        logging.warning("No se pudo cargar ningún texto para validación. Saltando evaluación de validación.")
+    else:
+        try:
+            # Usamos texts_val aquí
+            y_pred_val = pipeline.predict(texts_val)
+            target_names = [label_mapping[i] for i in sorted(label_mapping.keys())]
+            report = classification_report(y_val, y_pred_val, target_names=target_names)
+            accuracy = accuracy_score(y_val, y_pred_val)
+            print(report)
+            logging.info(f"Accuracy Validación: {accuracy:.4f}")
+        except Exception as e:
+            logging.error(f"Error durante la evaluación en el conjunto de validación: {e}")
+
+    # Guardar el pipeline y mapeo (sin cambios)
+    # ... (código para guardar modelo y mapeo) ...
+
+    return pipeline, label_mapping
+
+# --- Modifica la función main ---
+def main():
+    logging.info("--- Iniciando Script de Entrenamiento ---")
+    # load_data ahora carga el df con rutas
+    df = load_data(LABELED_DATA_PATH)
+
+    if df is not None and not df.empty:
+        # train_model ahora trabaja con rutas y carga texto internamente
+        pipeline, label_mapping = train_model(df)
+        if pipeline and label_mapping:
+            logging.info("--- Script de Entrenamiento Finalizado Exitosamente ---")
+        else:
+            logging.error("--- Script de Entrenamiento Finalizado con Errores ---")
+    else:
+        logging.error("No se pudieron cargar los datos. Finalizando script.")
+        logging.error("--- Script de Entrenamiento Finalizado con Errores ---")
+
+if __name__ == "__main__":
+    main()
+
+3. Modificaciones en src/evaluation.py
+import pandas as pd
+from pathlib import Path
+import joblib
+import logging
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, accuracy_score
+import matplotlib.pyplot as plt
+# >>> Importar (o definir) la función auxiliar <<<
+from training import load_texts # Asumiendo que la definiste en training.py
+
+# Configuración del logging (sin cambios)
+# Constantes y Configuración (sin cambios)
+# ...
+
+# --- Modifica la función load_test_data ---
+def load_test_data(file_path):
+    """Carga los datos de prueba (con rutas a markdown)."""
+    # ... (comprobación de existencia sin cambios) ...
+    try:
+        df = pd.read_csv(file_path)
+        # Asegurarse que las columnas necesarias existen y no tienen NaNs
+        # Usamos 'label_id' si fue guardado por training.py, sino 'label'
+        label_col = 'label_id' if 'label_id' in df.columns else 'label'
+        required_cols = ['markdown_path', label_col]
+        df.dropna(subset=required_cols, inplace=True)
+        df['markdown_path'] = df['markdown_path'].astype(str)
+
+        logging.info(f"Datos de prueba cargados desde {file_path}. Filas: {len(df)}")
+        if df.empty:
+             logging.error("El archivo CSV de prueba está vacío.")
+             return None
+        # Verificar columnas
+        if 'markdown_path' not in df.columns:
+            logging.error(f"Columna 'markdown_path' no encontrada en {file_path}")
+            return None
+        if label_col not in df.columns:
+             logging.error(f"Columna de etiqueta ('{label_col}') no encontrada en {file_path}")
+             return None
+        return df
+    except Exception as e:
+        logging.error(f"Error cargando el archivo CSV de prueba {file_path}: {e}")
+        return None
+
+# --- Modifica la función evaluate_model ---
+def evaluate_model(pipeline, df_test, label_mapping):
+    """Evalúa el modelo en el conjunto de prueba cargando texto desde rutas."""
+    logging.info("Iniciando evaluación en el conjunto de prueba...")
+
+    # Obtener rutas y etiquetas verdaderas
+    test_paths = df_test['markdown_path']
+    # Usar label_id si existe, sino mapear label string a id (requiere label_mapping)
+    if 'label_id' in df_test.columns:
+        y_test_true = df_test['label_id']
+    else:
+        # Mapear labels string a IDs si solo tenemos 'label'
+        # Crear mapeo inverso: {'label_str': id}
+        reverse_mapping = {v: k for k, v in label_mapping.items()}
+        y_test_true = df_test['label'].map(reverse_mapping)
+        if y_test_true.isnull().any():
+             logging.error("Algunas etiquetas en el test set no estaban en el mapeo original.")
+             # Podrías filtrar estas filas o detener
+             rows_with_unknown_labels = df_test[y_test_true.isnull()]
+             logging.error(f"Filas con etiquetas desconocidas:\n{rows_with_unknown_labels}")
+             return # Detener evaluación
+
+    if test_paths.empty:
+        logging.error("No hay rutas de archivo en el conjunto de prueba para evaluar.")
+        return
+
+    # >>> CARGAR TEXTOS ANTES DE PREDECIR <<<
+    texts_test = load_texts(test_paths)
+    if not texts_test:
+        logging.error("No se pudo cargar ningún texto para evaluación. Abortando.")
+        return
+
+    try:
+        # Predecir USANDO LOS TEXTOS CARGADOS
+        y_test_pred = pipeline.predict(texts_test)
+    except Exception as e:
+        logging.error(f"Error durante la predicción en el conjunto de prueba: {e}")
+        return
+
+    # Obtener nombres de etiquetas (sin cambios)
+    target_names = [label_mapping[i] for i in sorted(label_mapping.keys())]
+
+    # Generar y Guardar Reporte/Matriz (sin cambios en esta parte, usa y_test_true, y_test_pred)
+    # ... (código de classification_report, confusion_matrix, etc.) ...
+
+# --- Función main (sin cambios, llama a las funciones modificadas) ---
+# ...
+
+if __name__ == "__main__":
+    main()
+
+
+4. Modificaciones en src/predict.py
+En este caso, como predict.py ya toma una ruta de archivo como entrada y la función read_markdown_file lee el contenido, los cambios son mínimos. Solo añadimos un comentario para aclarar que no se aplica clean_text aquí.
+import joblib
+from pathlib import Path
+import argparse
+import logging
+import sys
+
+# Configuración del logging (sin cambios)
+# Constantes (sin cambios)
+# load_model_and_mapping (sin cambios)
+# read_markdown_file (sin cambios)
+
+# --- Modifica (ligeramente) la función predict_label ---
+def predict_label(pipeline, label_mapping, text_content):
+    """
+    Realiza la predicción para un texto dado.
+    ASUME que el text_content proviene de un archivo .md
+    que ya fue limpiado durante el preprocesamiento.
+    """
+    if not text_content:
+        logging.error("El contenido del texto está vacío. No se puede predecir.")
+        return None
+
+    try:
+        # No se necesita llamar a clean_text aquí bajo el plan actual
+        predicted_id = pipeline.predict([text_content])[0]
+        predicted_label = label_mapping.get(predicted_id, "Etiqueta Desconocida")
+        return predicted_label
+    except Exception as e:
+        logging.error(f"Error durante la predicción: {e}")
+        return None
+
+# --- Script Principal (main) ---
+def main():
+    parser = argparse.ArgumentParser(description="Clasifica un documento legal (en formato Markdown pre-procesado) usando el modelo entrenado.")
+    parser.add_argument("markdown_file", help="Ruta al archivo .md (se asume limpio por preprocessing.py) que se desea clasificar.")
+    args = parser.parse_args()
+
+    logging.info("--- Iniciando Script de Predicción ---")
+
+    pipeline, label_mapping = load_model_and_mapping(MODEL_PATH, MAPPING_PATH)
+    if not pipeline or not label_mapping:
+        logging.error("No se pudo cargar el modelo. Abortando.")
+        sys.exit(1)
+
+    # read_markdown_file lee el contenido (que se asume limpio)
+    markdown_content = read_markdown_file(args.markdown_file)
+    if not markdown_content:
+        logging.error("No se pudo leer el contenido del archivo. Abortando.")
+        sys.exit(1)
+
+    # predict_label usa el contenido leído directamente
+    predicted_label = predict_label(pipeline, label_mapping, markdown_content)
+
+    if predicted_label:
+        print(f"\nArchivo: {args.markdown_file}")
+        print(f"Etiqueta Predicha: --> {predicted_label} <--")
+        logging.info("--- Predicción Finalizada Exitosamente ---")
+    else:
+        logging.error("No se pudo obtener una predicción.")
+        logging.error("--- Predicción Finalizada con Errores ---")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+Con estas modificaciones, el flujo de datos es más eficiente en términos de memoria, la limpieza está centralizada y los scripts de entrenamiento/evaluación cargan el texto justo cuando lo necesitan. Recuerda probar bien los cambios después de aplicarlos.
