@@ -1,0 +1,61 @@
+me gustaria integrar lo siguiente en el srcript preprocessing.py, para tratar los casos de las páginas que esten escaneadas o cifradas y no se pueda extraer la info de manera satisfactorio. 
+se usará un servicio de Azure AI (Document Intelligence). Iluminame con la mejor manera de integrarlo en el script actual preprocessing.py.
+
+
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.ai.documentintelligence.models import DocumentAnalysisFeature
+
+def create_azure_client(endpoint, key):
+    """ Crea y retorna un cliente de Azure Document Intelligence. """
+    return DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+
+
+
+def analyze_document_read(client, file_path):
+    """ Analiza un documento con el modelo read. """
+    with open(file_path, "rb") as pdf:
+        poller = client.begin_analyze_document(
+            model_id="prebuilt-read",
+            body=pdf,
+            content_type="application/pdf",
+            locale="es-ES"
+        )
+    return poller.result()
+
+
+
+def is_anomalous_text(text):
+    """Detecta si el texto extraído es anómalo."""
+    if not text or (len(text.strip()) < 300 and "Este documento es una copia auténtica del documento" not in text):
+        return True
+    
+    non_alpha_chars = sum(1 for c in text if not c.isalnum() and c != ' ')
+    total_chars = len(text)
+    
+    if non_alpha_chars / total_chars > 0.20:
+        return True
+    return False
+
+def process_pages_with_ocr(anomalous_pages, reader, client):
+    """Procesa un grupo de páginas anómalas con OCR y retorna el texto extraído."""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
+        temp_file_path = temp_pdf.name
+        writer = PdfWriter()
+        
+        # Agregamos las páginas anómalas al PDF temporal
+        for idx in anomalous_pages:
+            writer.add_page(reader.pages[idx])
+        
+        writer.write(temp_pdf)
+    
+    # Llamamos a Azure para procesar el PDF con todas las páginas anómalas
+    result = analyze_document_read(client, temp_file_path)
+    
+    # Almacenamos el texto de cada página en el mismo orden que el original
+    ocr_texts = [" ".join(line.content for line in page.lines) for page in result.pages]
+    
+    # Eliminamos el archivo temporal
+    os.remove(temp_file_path)
+    
+    return ocr_texts
