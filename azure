@@ -257,3 +257,220 @@ $env:AZURE_DI_KEY="TU_CLAVE_SECRETA_AQUI"
    * process_folder lo recibe y lo pasa a remove_lexnet_pages.
    * remove_lexnet_pages lo usa cuando lo necesita.
 Esta integración es robusta, eficiente y desacoplada. El OCR solo se usa cuando es necesario, no interrumpe el flujo si no hay credenciales y respeta tu lógica de agrupar llamadas a la API.
+
+
+2****†****
+
+
+¡Excelente observación! Tienes toda la razón, es un fallo crítico en el flujo que propuse. Pido disculpas por no haberlo detectado.
+El problema, como bien señalas, es:
+ * Usamos pypdf y Azure OCR para obtener el texto de alta calidad de las páginas escaneadas.
+ * Pero luego, para generar el Markdown, le pasamos a markitdown el PDF temporal. Este PDF, aunque ya no tiene las páginas de LexNET, sigue conteniendo las páginas escaneadas como imágenes, de las cuales markitdown probablemente tampoco podrá extraer texto correctamente.
+ * Resultado: El texto del OCR de Azure se usa para el chequeo de "LexNET", pero se descarta y nunca llega al archivo .md final.
+Necesitamos una nueva estrategia que garantice que el texto del OCR sea el que se utilice para generar el archivo .md en los casos necesarios, mientras seguimos aprovechando markitdown para los documentos "normales".
+La Mejor Manera de Integrarlo: Un Flujo Híbrido
+La solución más robusta es tener dos caminos dentro de process_folder: uno para los PDFs "normales" (que usan markitdown) y otro para los PDFs que requieren OCR (que escriben el texto de Azure directamente).
+Aquí está el código modificado para src/preprocessing.py que implementa esta lógica.
+# --- (Importaciones y constantes sin cambios, asegúrate de tener todo lo anterior) ---
+# ...
+import os
+import subprocess
+import pandas as pd
+from pathlib import Path
+import logging
+import re
+from pypdf import PdfReader, PdfWriter
+import shutil
+import tempfile
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+# ...
+
+# --- (Tus 4 funciones de Azure + clean_text aquí, sin cambios) ---
+# create_azure_client, analyze_document_read, is_anomalous_text, process_pages_with_ocr, clean_text
+# ...
+
+# --- NUEVA Función de Lógica Central ---
+def get_definitive_text(pdf_path, azure_client):
+    """
+    Obtiene el texto definitivo de un PDF, usando Azure OCR como fallback.
+    También filtra internamente las páginas que contienen el marcador LexNET.
+    Retorna una única cadena con el texto completo del documento.
+    """
+    if not azure_client:
+        logging.warning("Se intentó obtener texto definitivo con OCR, pero el cliente de Azure no está disponible.")
+        # Fallback: intentar extraer texto solo con pypdf y devolverlo
+        try:
+            reader = PdfReader(pdf_path)
+            full_text = ""
+            for page in reader.pages:
+                text = page.extract_text() or ""
+                if LEXNET_MARKER not in text:
+                    full_text += text + "\n\n" # Añadir separador de página
+            return full_text
+        except Exception as e:
+            logging.error(f"Error leyendo PDF con pypdf en modo fallback: {e}")
+            return ""
+
+    # Flujo completo con OCR
+    try:
+        reader = PdfReader(pdf_path)
+        all_pages_text = []
+        anomalous_indices = []
+
+        # 1. Análisis con pypdf
+        for i, page in enumerate(reader.pages):
+            pypdf_text = page.extract_text()
+            if is_anomalous_text(pypdf_text):
+                anomalous_indices.append(i)
+                all_pages_text.append(None)
+            else:
+                all_pages_text.append(pypdf_text or "")
+
+        # 2. OCR en lote si es necesario
+        if anomalous_indices:
+            logging.info(f"'{pdf_path.name}' requiere OCR. Obteniendo texto desde Azure...")
+            ocr_texts = process_pages_with_ocr(anomalous_indices, reader, azure_client)
+            for list_idx, original_page_idx in enumerate(anomalous_indices):
+                if list_idx < len(ocr_texts):
+                    all_pages_text[original_page_idx] = ocr_texts[list_idx]
+                else:
+                    all_pages_text[original_page_idx] = ""
+
+        # 3. Ensamblaje del texto final, FILTRANDO páginas LexNET
+        final_content_parts = []
+        for text in all_pages_text:
+            if text and LEXNET_MARKER not in text:
+                final_content_parts.append(text)
+        
+        return "\n\n".join(final_content_parts) # Unir páginas con un doble salto de línea
+
+    except Exception as e:
+        logging.error(f"Error en get_definitive_text para '{pdf_path.name}': {e}")
+        return "" # Devolver vacío en caso de error grave
+
+# --- Función para crear PDF sin páginas LexNET (para el flujo Markitdown) ---
+def create_pdf_without_lexnet(input_pdf_path, output_pdf_path):
+    """
+    Crea una copia de un PDF eliminando solo las páginas con el marcador LexNET.
+    Usa únicamente pypdf para la detección de texto. No usa OCR.
+    """
+    try:
+        reader = PdfReader(input_pdf_path)
+        writer = PdfWriter()
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if LEXNET_MARKER not in text:
+                writer.add_page(page)
+        
+        if len(writer.pages) > 0:
+            with open(output_pdf_path, "wb") as f_out:
+                writer.write(f_out)
+            return True
+        else:
+            logging.warning(f"PDF '{input_pdf_path.name}' quedó vacío tras quitar páginas LexNET.")
+            return False
+    except Exception as e:
+        logging.error(f"Error en create_pdf_without_lexnet para '{input_pdf_path.name}': {e}")
+        return False
+
+
+# --- REESCRIBIMOS `process_folder` para implementar el flujo HÍBRIDO ---
+def process_folder(raw_folder_path, processed_folder, temp_pdf_folder, label, azure_client=None):
+    # ... (inicio de la función sin cambios) ...
+
+    for pdf_file in pdf_files:
+        logging.info(f"Procesando archivo: {pdf_file.name}")
+        original_stem = pdf_file.stem
+        md_final_path = processed_folder / f"{original_stem}.md"
+
+        # --- Decisión: ¿Este PDF necesita OCR o puede usar Markitdown? ---
+        # Verificamos si alguna página es anómala ANTES de decidir el camino.
+        needs_ocr = False
+        if azure_client:
+            try:
+                reader = PdfReader(pdf_file)
+                for page in reader.pages:
+                    if is_anomalous_text(page.extract_text()):
+                        needs_ocr = True
+                        break # Encontramos una, es suficiente para decidir
+            except Exception as e:
+                logging.error(f"No se pudo pre-analizar '{pdf_file.name}' para decidir ruta. Se usará Markitdown por defecto. Error: {e}")
+
+        final_text = None
+        # --- RUTA 1: Se necesita OCR ---
+        if needs_ocr:
+            logging.info(f"'{pdf_file.name}' es anómalo. Usando ruta de extracción directa con OCR de Azure.")
+            # Obtenemos el texto definitivo, que ya viene filtrado de páginas LexNET
+            final_text = get_definitive_text(pdf_file, azure_client)
+            # No se necesita markitdown ni PDF temporal. El texto es el producto final.
+
+        # --- RUTA 2: PDF normal, usar Markitdown ---
+        else:
+            logging.info(f"'{pdf_file.name}' parece normal. Usando ruta de Markitdown.")
+            temp_pdf_path = temp_pdf_folder / f"{original_stem}_temp.pdf"
+            
+            # 1. Crear PDF temporal sin páginas LexNET
+            if create_pdf_without_lexnet(pdf_file, temp_pdf_path):
+                # 2. Convertir el PDF temporal a MD
+                md_path_from_converter = convert_pdf_to_md(temp_pdf_path, processed_folder, original_stem)
+                # 3. Limpiar el temporal
+                temp_pdf_path.unlink(missing_ok=True)
+                
+                # 4. Leer el texto del MD generado para tenerlo en la variable 'final_text'
+                if md_path_from_converter:
+                    try:
+                        with open(md_path_from_converter, 'r', encoding='utf-8') as f:
+                           final_text = f.read()
+                    except Exception as e:
+                        logging.error(f"No se pudo leer el MD generado por Markitdown para '{pdf_file.name}': {e}")
+
+        # --- Paso final común: Limpiar y guardar el texto en el archivo .md ---
+        if final_text is not None:
+            # Aplicar limpieza final y guardar
+            cleaned_text = clean_text(final_text)
+            try:
+                with open(md_final_path, 'w', encoding='utf-8') as f:
+                    f.write(cleaned_text)
+                logging.info(f"Archivo final '{md_final_path.name}' guardado/sobrescrito.")
+                
+                # Añadir la ruta a la lista de datos para el CSV
+                data.append({
+                    'source_pdf': pdf_file.name,
+                    'markdown_file': md_final_path.name,
+                    'markdown_path': str(md_final_path),
+                    'label': label
+                })
+            except Exception as e:
+                logging.error(f"Error al guardar el MD final '{md_final_path.name}': {e}")
+        else:
+            logging.warning(f"No se pudo generar contenido final para '{pdf_file.name}'. No se creará archivo .md ni se añadirá al dataset.")
+    
+    return data
+
+# --- (Las funciones `main`, `convert_pdf_to_md` y las de Azure no necesitan más cambios) ---
+# ...
+
+Explicación de la Nueva Lógica
+ * Función get_definitive_text:
+   * Esta es la nueva función central para los casos de OCR.
+   * Recibe un PDF y el cliente de Azure.
+   * Implementa la lógica que diseñamos antes (análisis con pypdf, lote de OCR con Azure, fusión de textos).
+   * Crucialmente, también filtra las páginas con "Mensaje LexNET -" basándose en el texto final y de alta calidad.
+   * Su única salida es una cadena de texto gigante con todo el contenido válido del documento, listo para ser guardado.
+ * Función create_pdf_without_lexnet:
+   * Esta es una versión simplificada de la antigua remove_lexnet_pages. Su única responsabilidad es crear una copia de un PDF sin las páginas de LexNET, usando solo pypdf. Es para el flujo que no usa OCR.
+ * El Orquestador: process_folder con Flujo Híbrido:
+   * Para cada PDF, primero hace una revisión rápida para ver si alguna de sus páginas parece anómala.
+   * Si detecta una anomalía (y hay cliente de Azure):
+     * Entra en la "Ruta OCR".
+     * Llama a get_definitive_text para obtener el texto de alta calidad directamente.
+     * No usa markitdown ni PDFs temporales. El texto de Azure es el producto final.
+   * Si el PDF parece normal:
+     * Entra en la "Ruta Markitdown".
+     * Usa create_pdf_without_lexnet para generar el PDF temporal limpio.
+     * Llama a markitdown para que haga su trabajo de extracción (que puede preservar mejor la maquetación).
+     * Lee el texto del .md resultante.
+   * Paso Final Común: Al final, ambas rutas convergen. Tenemos una variable final_text que contiene el mejor texto posible (ya sea de OCR o de markitdown). Este texto se limpia con clean_text y se guarda en el archivo .md final.
+Este nuevo enfoque soluciona el problema de raíz, asegurando que el texto de alta calidad del OCR es el que realmente se guarda y se utiliza en los documentos que lo necesitan, mientras se mantiene el uso de markitdown para los casos estándar.
+
