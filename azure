@@ -1,0 +1,259 @@
+¡Excelente! Integrar un servicio de OCR como Azure Document Intelligence es el paso lógico y profesional para manejar PDFs escaneados o con texto corrupto. La manera que propones de agrupar las páginas anómalas y procesarlas en un solo lote es muy eficiente para minimizar las llamadas a la API.
+A continuación te muestro la mejor manera de integrar este flujo en tu script src/preprocessing.py, manteniendo la lógica existente y añadiendo esta nueva capacidad de forma robusta y condicional.
+1. Actualiza requirements.txt
+Añade las bibliotecas de Azure:
+pandas>=1.3.0
+scikit-learn>=1.0.0
+joblib>=1.0.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+markitdown
+pypdf>=4.0.0
+azure-ai-documentintelligence # Añadido
+azure-core # Añadido
+
+Y ejecuta pip install -r requirements.txt para instalarlas.
+2. Modificaciones en src/preprocessing.py
+Vamos a reestructurar el script para que incorpore tus funciones y la nueva lógica.
+# --- Nuevas importaciones ---
+import os
+import subprocess
+import pandas as pd
+from pathlib import Path
+import logging
+import re
+from pypdf import PdfReader, PdfWriter
+import shutil
+import tempfile # Necesario para las funciones de Azure
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+# from azure.ai.documentintelligence.models import DocumentAnalysisFeature # No se usa en tu código, la comento
+
+# --- Configuración del logging (sin cambios) ---
+# ...
+
+# --- Constantes (sin cambios) ---
+# ...
+
+# >>> INICIO: Pega aquí tus 4 funciones de Azure <<<
+def create_azure_client(endpoint, key):
+    """ Crea y retorna un cliente de Azure Document Intelligence. """
+    logging.info("Creando cliente de Azure Document Intelligence...")
+    return DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+
+def analyze_document_read(client, file_path):
+    """ Analiza un documento con el modelo read. """
+    logging.info(f"Enviando '{Path(file_path).name}' a Azure Document Intelligence (modelo 'read')...")
+    with open(file_path, "rb") as pdf:
+        poller = client.begin_analyze_document(
+            model_id="prebuilt-read",
+            body=pdf,
+            content_type="application/pdf",
+            locale="es-ES" # Especificar español es una buena práctica
+        )
+    result = poller.result()
+    logging.info("Análisis de Azure completado.")
+    return result
+
+def is_anomalous_text(text):
+    """Detecta si el texto extraído es anómalo."""
+    # Tu lógica aquí es un buen punto de partida.
+    if not text or not text.strip():
+        return True
+    
+    # Si la página es muy corta, no es anómala si contiene el aviso legal típico.
+    if len(text.strip()) < 300 and "Este documento es una copia auténtica del documento" not in text:
+        return True
+    
+    # Comprobar proporción de caracteres no alfanuméricos
+    # (puede dar falsos positivos en texto con muchos símbolos, como '€', '/', etc.)
+    try:
+        non_alpha_chars = sum(1 for c in text if not c.isalnum() and not c.isspace())
+        total_chars = len(text)
+        if total_chars > 0 and (non_alpha_chars / total_chars > 0.30): # Ajustado a 30% para ser más permisivo
+            logging.info("Texto marcado como anómalo por alta proporción de caracteres no alfanuméricos.")
+            return True
+    except ZeroDivisionError:
+        return True
+        
+    return False
+
+def process_pages_with_ocr(anomalous_pages_indices, reader, client):
+    """Procesa un grupo de páginas anómalas con OCR y retorna el texto extraído."""
+    # Usar un archivo temporal con nombre es más robusto entre sistemas operativos.
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
+        temp_file_path = temp_pdf.name
+        writer = PdfWriter()
+        
+        logging.info(f"Creando PDF temporal con {len(anomalous_pages_indices)} página(s) anómala(s) para OCR.")
+        # Agregamos las páginas anómalas al PDF temporal
+        for idx in anomalous_pages_indices:
+            writer.add_page(reader.pages[idx])
+        
+        writer.write(temp_pdf)
+    
+    ocr_texts = []
+    try:
+        # Llamamos a Azure para procesar el PDF con todas las páginas anómalas
+        result = analyze_document_read(client, temp_file_path)
+        
+        # Almacenamos el texto de cada página
+        # Aseguramos que cada 'página' en el resultado tenga su texto concatenado.
+        ocr_texts = [" ".join([line.content for line in page.lines]) for page in result.pages]
+    except Exception as e:
+        logging.error(f"Falló la llamada a Azure OCR en el archivo temporal: {e}")
+        # En caso de error, devolvemos una lista de strings vacíos para no romper el flujo
+        ocr_texts = ["" for _ in anomalous_pages_indices]
+    finally:
+        # Eliminamos el archivo temporal
+        os.remove(temp_file_path)
+        logging.info(f"Archivo temporal '{temp_file_path}' eliminado.")
+    
+    return ocr_texts
+
+# --- FIN: Tus 4 funciones de Azure ---
+
+# --- REESCRIBIMOS la función remove_lexnet_pages para integrar el OCR ---
+def remove_lexnet_pages(input_pdf_path, output_pdf_path, azure_client=None):
+    """
+    Lee un PDF. Para cada página:
+    1. Intenta extraer texto con pypdf.
+    2. Si el texto es anómalo Y hay cliente de Azure, marca la página para OCR.
+    3. Procesa en lote las páginas anómalas con Azure.
+    4. Reconstruye el texto completo del documento.
+    5. Elimina las páginas que contienen el marcador LexNET (basado en el texto final).
+    6. Guarda el PDF resultante sin las páginas LexNET.
+    """
+    try:
+        reader = PdfReader(input_pdf_path)
+        writer = PdfWriter()
+        
+        all_pages_text = [] # Almacenará el texto final de cada página
+        anomalous_indices = [] # Almacenará los índices de las páginas que necesitan OCR
+
+        # 1. Primer pase: Análisis de texto y detección de anomalías
+        logging.info(f"Analizando páginas de '{input_pdf_path.name}' con pypdf...")
+        for i, page in enumerate(reader.pages):
+            pypdf_text = page.extract_text()
+            if azure_client and is_anomalous_text(pypdf_text):
+                logging.info(f"  -> Página {i+1} marcada para OCR de Azure.")
+                anomalous_indices.append(i)
+                all_pages_text.append(None) # Marcador de posición para el texto OCR
+            else:
+                all_pages_text.append(pypdf_text or "") # Usar texto pypdf (o vacío si es None)
+
+        # 2. Segundo pase (condicional): Procesar con Azure OCR si es necesario
+        if anomalous_indices:
+            logging.info(f"Procesando {len(anomalous_indices)} página(s) con Azure OCR...")
+            ocr_texts = process_pages_with_ocr(anomalous_indices, reader, azure_client)
+            
+            # Rellenar los textos faltantes con los resultados del OCR
+            for list_idx, original_page_idx in enumerate(anomalous_indices):
+                if list_idx < len(ocr_texts):
+                    all_pages_text[original_page_idx] = ocr_texts[list_idx]
+                else:
+                    logging.error(f"Discrepancia de resultados de OCR para página {original_page_idx}. Dejando como texto vacío.")
+                    all_pages_text[original_page_idx] = ""
+
+        # 3. Tercer pase: Ensamblaje final del PDF sin páginas LexNET
+        logging.info("Ensamblando PDF final sin páginas de LexNET...")
+        pages_removed_count = 0
+        for i, page in enumerate(reader.pages):
+            final_text = all_pages_text[i]
+            # Comprobación del marcador LexNET en el texto final (de pypdf o Azure)
+            if final_text and LEXNET_MARKER in final_text:
+                logging.info(f"  -> Eliminando página {i+1} de '{input_pdf_path.name}' (contiene '{LEXNET_MARKER}')")
+                pages_removed_count += 1
+            else:
+                writer.add_page(page)
+
+        # Guardar el PDF resultante (lógica sin cambios)
+        # ... (código para guardar el writer en output_pdf_path) ...
+        # (Este bloque es idéntico al que ya tenías)
+        if len(writer.pages) == 0:
+            logging.warning(f"¡El PDF '{input_pdf_path.name}' quedó vacío! No se generará archivo.")
+            output_pdf_path.unlink(missing_ok=True)
+            return False
+            
+        output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_pdf_path, "wb") as f_out:
+            writer.write(f_out)
+        
+        logging.info(f"PDF temporal guardado en: {output_pdf_path} (se eliminaron {pages_removed_count} páginas de LexNET).")
+        return True
+
+    except Exception as e:
+        logging.error(f"Error CRÍTICO en el pre-procesamiento de PDF '{input_pdf_path.name}': {e}")
+        output_pdf_path.unlink(missing_ok=True)
+        return False
+
+# --- Modifica la llamada en `process_folder` ---
+def process_folder(raw_folder_path, processed_folder, temp_pdf_folder, label, azure_client=None):
+    # ... (inicio de la función sin cambios) ...
+    for pdf_file in pdf_files:
+        # ... (código para definir original_stem, temp_pdf_path) ...
+
+        # Paso 1: Eliminar páginas con pypdf (y ahora potencialmente con OCR)
+        # >>> PASAMOS EL CLIENTE DE AZURE AQUÍ <<<
+        success_pypdf = remove_lexnet_pages(pdf_file, temp_pdf_path, azure_client)
+
+        # ... (resto de la función `process_folder` sin cambios) ...
+
+
+# --- Modifica la función `main` para manejar las credenciales y el cliente ---
+def main():
+    logging.info("--- Iniciando Script de Preprocesamiento (con filtro LexNET y OCR de Azure) ---")
+    
+    # --- NUEVO: Carga de credenciales y creación del cliente de Azure ---
+    azure_client = None
+    endpoint = os.getenv("AZURE_DI_ENDPOINT")
+    key = os.getenv("AZURE_DI_KEY")
+
+    if endpoint and key:
+        logging.info("Credenciales de Azure encontradas en las variables de entorno.")
+        try:
+            azure_client = create_azure_client(endpoint, key)
+        except Exception as e:
+            logging.error(f"No se pudo crear el cliente de Azure. El OCR no estará disponible. Error: {e}")
+    else:
+        logging.warning("No se encontraron las variables de entorno AZURE_DI_ENDPOINT o AZURE_DI_KEY.")
+        logging.warning("El script se ejecutará sin la capacidad de OCR para páginas escaneadas/cifradas.")
+
+    # ... (resto de la función main: limpiar directorios, etc.) ...
+    
+    # ... (bucle for folder_name, label in LABEL_MAP.items():) ...
+        # >>> PASAMOS EL CLIENTE DE AZURE AQUÍ <<<
+        folder_data = process_folder(raw_folder_path, PROCESSED_FOLDER, TEMP_PDF_FOLDER, label, azure_client)
+        # ... (resto del bucle y de la función main sin cambios) ...
+
+
+if __name__ == "__main__":
+    main()
+
+
+Cómo Usarlo y Explicación de los Cambios
+ * Manejo de Credenciales (¡IMPORTANTE!):
+   * El script ahora busca tus credenciales de Azure en variables de entorno. Esto es una práctica de seguridad estándar para no escribir claves secretas en el código.
+   * Antes de ejecutar el script, necesitas configurar estas variables en tu terminal:
+     En Linux / macOS:
+     export AZURE_DI_ENDPOINT="https://TUDOCUMENTINTELLIGENCE-ENDPOINT.cognitiveservices.azure.com/"
+export AZURE_DI_KEY="TU_CLAVE_SECRETA_AQUI"
+
+     En Windows (Command Prompt):
+     set AZURE_DI_ENDPOINT="https://TUDOCUMENTINTELLIGENCE-ENDPOINT.cognitiveservices.azure.com/"
+set AZURE_DI_KEY="TU_CLAVE_SECRETA_AQUI"
+
+     En Windows (PowerShell):
+     $env:AZURE_DI_ENDPOINT="https://TUDOCUMENTINTELLIGENCE-ENDPOINT.cognitiveservices.azure.com/"
+$env:AZURE_DI_KEY="TU_CLAVE_SECRETA_AQUI"
+
+   * Si el script no encuentra estas variables, simplemente mostrará una advertencia y continuará sin usar OCR. Esto lo hace flexible y no te obliga a tener credenciales para ejecutarlo.
+ * Lógica de Integración en remove_lexnet_pages:
+   * Paso 1 (Análisis): El script primero recorre el PDF página por página usando pypdf. Si el texto extraído parece "anómalo" (según tu función is_anomalous_text), guarda el número de esa página en una lista y deja su texto como "pendiente".
+   * Paso 2 (OCR en Lote): Si se encontraron páginas anómalas, se llama a tu función process_pages_with_ocr. Esta crea un único PDF temporal con solo esas páginas y hace una sola llamada a Azure, lo cual es muy eficiente.
+   * Paso 3 (Ensamblaje): Finalmente, el script tiene el "mejor" texto disponible para cada página (ya sea de pypdf o de Azure OCR). Con este texto final, realiza la comprobación de Mensaje LexNET - y reconstruye el PDF sin las páginas no deseadas.
+ * Flujo de Datos:
+   * main crea el cliente de Azure (si puede) y lo pasa a process_folder.
+   * process_folder lo recibe y lo pasa a remove_lexnet_pages.
+   * remove_lexnet_pages lo usa cuando lo necesita.
+Esta integración es robusta, eficiente y desacoplada. El OCR solo se usa cuando es necesario, no interrumpe el flujo si no hay credenciales y respeta tu lógica de agrupar llamadas a la API.
