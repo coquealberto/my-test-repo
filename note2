@@ -1,0 +1,453 @@
+¡Excelente idea! Un notebook de experimentación es fundamental para un trabajo de Data Science riguroso. Este tipo de entorno te permite iterar rápidamente, probar hipótesis y mantener un registro organizado de cada prueba.
+A continuación, te presento un Jupyter Notebook diseñado como un "banco de pruebas" o "laboratorio". Su objetivo no es ser bonito, sino funcional, modular y fácil de extender.
+Diferencias clave con el notebook de presentación:
+ * Enfoque en la Automatización: Está diseñado para ejecutar una serie de experimentos definidos en una configuración.
+ * Registro Sistemático: Cada resultado se guarda en un archivo CSV para que no se pierda nada y se pueda analizar al final.
+ * Modularidad: Las funciones están diseñadas para que puedas añadir nuevos modelos o vectorizadores con cambios mínimos.
+ * Control Centralizado: La división de datos se hace una sola vez, garantizando que todos los modelos compitan en igualdad de condiciones sobre el mismo conjunto de test.
+📓 Laboratorio de Experimentación para Clasificación de Documentos
+Objetivo: Este notebook sirve como un entorno de trabajo para entrenar, evaluar y comparar sistemáticamente múltiples pipelines de clasificación. El fin es encontrar la combinación óptima de vectorizador, modelo y hiperparámetros.
+1. Configuración del Entorno
+Primero, importamos todas las librerías necesarias y definimos las constantes y rutas que usaremos a lo largo del notebook.
+# --- General ---
+import pandas as pd
+import numpy as np
+import time
+import joblib
+from pathlib import Path
+import logging
+import gc # Garbage Collector
+
+# --- Sklearn ---
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score, f1_score, classification_report
+
+# --- Gensim (para Word2Vec) ---
+from gensim.models import KeyedVectors
+from gensim.utils import simple_preprocess
+
+# --- TensorFlow / Keras (para LSTM) ---
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import EarlyStopping
+
+# --- Transformers (para BERT/RoBERTa) ---
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, EarlyStoppingCallback
+from datasets import Dataset
+import torch
+
+# --- Configuración ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+pd.set_option('display.width', 1000)
+
+# --- Constantes ---
+LABELED_DATA_PATH = Path('data/labeled/labeled_documents_35_lexnet.csv')
+SBW_VECTORS_PATH = Path('models/sbw_vectors.bin')
+RESULTS_CSV_PATH = Path('results/experiment_log.csv') # Archivo para guardar todos los resultados
+RANDOM_STATE = 42
+TEST_SIZE = 0.15
+VALIDATION_SIZE = 0.15
+
+# --- Comprobar disponibilidad de GPU ---
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logging.info(f"GPUs disponibles: {len(gpus)}")
+        DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    except RuntimeError as e:
+        logging.error(e)
+else:
+    logging.info("No se encontraron GPUs. Se usará CPU.")
+    DEVICE = 'cpu'
+
+
+2. Carga y Preparación de Datos Centralizada
+Para asegurar una comparación justa, cargamos y dividimos los datos una única vez. Todos los modelos se entrenarán y evaluarán sobre los mismos conjuntos de datos.
+def load_and_prepare_data(data_path, test_size, val_size, random_state):
+    """
+    Carga, procesa y divide los datos en conjuntos de entrenamiento, validación y prueba.
+    """
+    logging.info(f"Cargando datos desde {data_path}")
+    df = pd.read_csv(data_path)
+    df.dropna(subset=['markdown_path', 'label'], inplace=True)
+
+    # Codificar etiquetas
+    df['label_id'] = df['label'].astype('category').cat.codes
+    label_mapping = dict(enumerate(df['label'].astype('category').cat.categories))
+    num_classes = len(label_mapping)
+
+    logging.info(f"Encontradas {num_classes} clases.")
+
+    # Dividir datos
+    X_paths = df['markdown_path']
+    y = df['label_id']
+    
+    X_train_val_paths, X_test_paths, y_train_val, y_test = train_test_split(
+        X_paths, y, test_size=test_size, random_state=random_state, stratify=y
+    )
+    
+    val_size_relative = val_size / (1.0 - test_size)
+    X_train_paths, X_val_paths, y_train, y_val = train_test_split(
+        X_train_val_paths, y_train_val, test_size=val_size_relative,
+        random_state=random_state, stratify=y_train_val
+    )
+
+    logging.info(f"Tamaños -> Train: {len(X_train_paths)}, Val: {len(X_val_paths)}, Test: {len(X_test_paths)}")
+    
+    # Cargar el contenido de texto
+    X_train_texts = [Path(p).read_text(encoding='utf-8') for p in X_train_paths]
+    X_val_texts = [Path(p).read_text(encoding='utf-8') for p in X_val_paths]
+    X_test_texts = [Path(p).read_text(encoding='utf-8') for p in X_test_paths]
+
+    return (X_train_texts, X_val_texts, X_test_texts,
+            y_train, y_val, y_test,
+            label_mapping, num_classes)
+
+# Ejecutar la carga de datos
+(X_train_texts, X_val_texts, X_test_texts,
+ y_train, y_val, y_test,
+ label_mapping, NUM_CLASSES) = load_and_prepare_data(LABELED_DATA_PATH, TEST_SIZE, VALIDATION_SIZE, RANDOM_STATE)
+
+
+3. Definición de Pipelines y Experimentos
+Aquí es donde definimos cada uno de los "experimentos". Un experimento consiste en un vectorizador, un clasificador y un conjunto de hiperparámetros a probar.
+3.1 Clases de Transformadores Personalizados (de training.py)
+Incluimos las clases personalizadas aquí para que el notebook sea autocontenido.
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class Word2VecAverager(BaseEstimator, TransformerMixin):
+    def __init__(self, model_path, binary=True):
+        self.model_path = model_path
+        self.binary = binary
+        self.model = None
+
+    def fit(self, X, y=None):
+        if self.model is None:
+            logging.info("Cargando modelo Word2Vec...")
+            self.model = KeyedVectors.load_word2vec_format(self.model_path, binary=self.binary)
+            self.vector_size = self.model.vector_size
+        return self
+
+    def transform(self, X):
+        vectors = []
+        for doc in X:
+            tokens = simple_preprocess(str(doc))
+            valid_tokens = [token for token in tokens if token in self.model]
+            if valid_tokens:
+                vectors.append(np.mean([self.model[token] for token in valid_tokens], axis=0))
+            else:
+                vectors.append(np.zeros(self.vector_size))
+        return np.array(vectors)
+
+3.2 Configuración de los Experimentos
+Este es el cerebro del laboratorio. Definimos cada pipeline que queremos probar en una lista de diccionarios. Para añadir un nuevo experimento, simplemente añade un nuevo diccionario a la lista sklearn_experiments.
+# Inicializar los vectorizadores que se cargarán una sola vez
+w2v_vectorizer = Word2VecAverager(model_path=SBW_VECTORS_PATH)
+
+# Definir los experimentos para Scikit-learn
+sklearn_experiments = [
+    {
+        'name': 'TFIDF_SVM',
+        'pipeline': Pipeline([
+            ('tfidf', TfidfVectorizer(random_state=RANDOM_STATE)),
+            ('clf', LinearSVC(random_state=RANDOM_STATE, dual="auto", max_iter=3000))
+        ]),
+        'params': {
+            'tfidf__ngram_range': [(1, 1), (1, 2)],
+            'tfidf__min_df': [5, 10],
+            'tfidf__max_df': [0.9, 0.95],
+            'clf__C': [1, 10]
+        }
+    },
+    {
+        'name': 'TFIDF_RandomForest',
+        'pipeline': Pipeline([
+            ('tfidf', TfidfVectorizer(random_state=RANDOM_STATE)),
+            ('clf', RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1))
+        ]),
+        'params': {
+            'tfidf__ngram_range': [(1, 1)],
+            'tfidf__min_df': [10],
+            'clf__n_estimators': [100, 200],
+            'clf__max_depth': [None, 50]
+        }
+    },
+    {
+        'name': 'Word2Vec_SVM',
+        'pipeline': Pipeline([
+            ('w2v', w2v_vectorizer),
+            ('clf', LinearSVC(random_state=RANDOM_STATE, dual="auto", max_iter=4000))
+        ]),
+        'params': {
+            'clf__C': [1, 10, 20]
+        }
+    }
+]
+
+
+4. Motor de Ejecución de Experimentos
+Este es el bucle principal que itera a través de los experimentos definidos, los ejecuta, y guarda los resultados.
+4.1. Ejecutor para Pipelines de Scikit-Learn
+def run_sklearn_experiment(experiment, X_train, y_train, X_test, y_test):
+    """Ejecuta un único experimento de Scikit-Learn usando GridSearchCV."""
+    name = experiment['name']
+    pipeline = experiment['pipeline']
+    params = experiment['params']
+    
+    logging.info(f"--- Iniciando Experimento: {name} ---")
+    start_time = time.time()
+    
+    grid = GridSearchCV(pipeline, param_grid=params, cv=3, n_jobs=-1, scoring='f1_macro', verbose=1)
+    grid.fit(X_train, y_train)
+    
+    end_time = time.time()
+    training_time = end_time - start_time
+    
+    logging.info(f"Mejores parámetros para {name}: {grid.best_params_}")
+    
+    # Evaluar en el conjunto de test
+    best_model = grid.best_estimator_
+    y_pred = best_model.predict(X_test)
+    
+    accuracy = accuracy_score(y_test, y_pred)
+    f1_macro = f1_score(y_test, y_pred, average='macro')
+    f1_weighted = f1_score(y_test, y_pred, average='weighted')
+    
+    result = {
+        'name': name,
+        'accuracy': accuracy,
+        'f1_macro': f1_macro,
+        'f1_weighted': f1_weighted,
+        'training_time_seconds': training_time,
+        'best_params': str(grid.best_params_)
+    }
+    
+    logging.info(f"Resultado para {name}: Accuracy={accuracy:.4f}, F1-Macro={f1_macro:.4f}")
+    
+    return result
+
+# --- Bucle principal para SKLEARN ---
+results_log = []
+for experiment_config in sklearn_experiments:
+    try:
+        result = run_sklearn_experiment(experiment_config, X_train_texts, y_train, X_test_texts, y_test)
+        results_log.append(result)
+    except Exception as e:
+        logging.error(f"FALLÓ el experimento {experiment_config['name']}: {e}")
+
+    # Guardar resultados intermedios
+    df_results = pd.DataFrame(results_log)
+    df_results.to_csv(RESULTS_CSV_PATH, index=False)
+    logging.info(f"Resultados guardados en {RESULTS_CSV_PATH}")
+
+
+4.2. Ejecutor para Modelos de Deep Learning
+Los modelos de DL no se ajustan bien a GridSearchCV. Definimos funciones de entrenamiento específicas para ellos y los ejecutamos con configuraciones predefinidas.
+# --- Función de entrenamiento para LSTM ---
+def run_lstm_experiment(name, X_train, y_train, X_val, y_val, X_test, y_test, num_classes,
+                        max_words=20000, max_len=512, embed_dim=300,
+                        lstm_units=128, dropout=0.5, epochs=10, batch_size=32):
+    
+    logging.info(f"--- Iniciando Experimento: {name} ---")
+    start_time = time.time()
+    
+    # Tokenización
+    tokenizer = Tokenizer(num_words=max_words, oov_token="<OOV>")
+    tokenizer.fit_on_texts(X_train)
+    X_train_seq = pad_sequences(tokenizer.texts_to_sequences(X_train), maxlen=max_len)
+    X_val_seq = pad_sequences(tokenizer.texts_to_sequences(X_val), maxlen=max_len)
+    X_test_seq = pad_sequences(tokenizer.texts_to_sequences(X_test), maxlen=max_len)
+    
+    y_train_cat = to_categorical(y_train, num_classes=num_classes)
+    y_val_cat = to_categorical(y_val, num_classes=num_classes)
+    y_test_cat = to_categorical(y_test, num_classes=num_classes)
+    
+    # Modelo
+    model = Sequential([
+        Embedding(input_dim=max_words, output_dim=embed_dim, input_length=max_len),
+        Bidirectional(LSTM(lstm_units)),
+        Dropout(dropout),
+        Dense(num_classes, activation='softmax')
+    ])
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    
+    # Entrenamiento
+    early_stop = EarlyStopping(monitor='val_loss', patience=2, restore_best_weights=True)
+    model.fit(X_train_seq, y_train_cat, validation_data=(X_val_seq, y_val_cat),
+              epochs=epochs, batch_size=batch_size, callbacks=[early_stop], verbose=1)
+    
+    training_time = time.time() - start_time
+    
+    # Evaluación
+    y_pred_probs = model.predict(X_test_seq)
+    y_pred = np.argmax(y_pred_probs, axis=1)
+    
+    accuracy = accuracy_score(y_test, y_pred)
+    f1_macro = f1_score(y_test, y_pred, average='macro')
+    f1_weighted = f1_score(y_test, y_pred, average='weighted')
+    
+    result = {
+        'name': name, 'accuracy': accuracy, 'f1_macro': f1_macro, 'f1_weighted': f1_weighted,
+        'training_time_seconds': training_time,
+        'best_params': f"max_words={max_words}, max_len={max_len}, lstm_units={lstm_units}, epochs={epochs}"
+    }
+    
+    logging.info(f"Resultado para {name}: Accuracy={accuracy:.4f}, F1-Macro={f1_macro:.4f}")
+    
+    # Limpiar memoria
+    del model, tokenizer
+    gc.collect()
+    tf.keras.backend.clear_session()
+    
+    return result
+
+# --- Ejecutar experimento LSTM ---
+try:
+    lstm_result = run_lstm_experiment(
+        'BiLSTM_from_scratch', X_train_texts, y_train, X_val_texts, y_val, X_test_texts, y_test,
+        num_classes=NUM_CLASSES, epochs=5 # Usar menos épocas para un ensayo rápido
+    )
+    results_log.append(lstm_result)
+    df_results = pd.DataFrame(results_log)
+    df_results.to_csv(RESULTS_CSV_PATH, index=False)
+except Exception as e:
+    logging.error(f"FALLÓ el experimento BiLSTM: {e}")
+
+# --- Función de entrenamiento para Transformers ---
+def run_transformer_experiment(name, model_name, X_train, y_train, X_val, y_val, X_test, y_test,
+                               learning_rate=2e-5, epochs=3, batch_size=16, max_length=512):
+    
+    logging.info(f"--- Iniciando Experimento: {name} ({model_name}) ---")
+    start_time = time.time()
+    
+    # Preparar Datasets
+    train_dataset = Dataset.from_dict({'text': X_train, 'label': y_train})
+    val_dataset = Dataset.from_dict({'text': X_val, 'label': y_val})
+    test_dataset = Dataset.from_dict({'text': X_test, 'label': y_test})
+    
+    # Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    def tokenize(batch):
+        return tokenizer(batch['text'], padding='max_length', truncation=True, max_length=max_length)
+        
+    train_dataset = train_dataset.map(tokenize, batched=True)
+    val_dataset = val_dataset.map(tokenize, batched=True)
+    test_dataset = test_dataset.map(tokenize, batched=True)
+    
+    # Modelo
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=NUM_CLASSES).to(DEVICE)
+    
+    # Argumentos de entrenamiento
+    training_args = TrainingArguments(
+        output_dir=f'./results/{name}',
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        learning_rate=learning_rate,
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        logging_steps=50,
+        report_to="none" # Desactivar W&B
+    )
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=1)]
+    )
+    
+    trainer.train()
+    training_time = time.time() - start_time
+    
+    # Evaluación
+    preds = trainer.predict(test_dataset)
+    y_pred = np.argmax(preds.predictions, axis=-1)
+    
+    accuracy = accuracy_score(y_test, y_pred)
+    f1_macro = f1_score(y_test, y_pred, average='macro')
+    f1_weighted = f1_score(y_test, y_pred, average='weighted')
+    
+    result = {
+        'name': name, 'accuracy': accuracy, 'f1_macro': f1_macro, 'f1_weighted': f1_weighted,
+        'training_time_seconds': training_time,
+        'best_params': f"model={model_name}, lr={learning_rate}, epochs={epochs}, max_len={max_length}"
+    }
+    
+    logging.info(f"Resultado para {name}: Accuracy={accuracy:.4f}, F1-Macro={f1_macro:.4f}")
+    
+    # Limpiar memoria
+    del model, tokenizer, trainer
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return result
+
+# --- Ejecutar experimento Transformer ---
+# (ADVERTENCIA: Esto requiere muchos recursos y tiempo)
+try:
+    transformer_result = run_transformer_experiment(
+        'RoBERTa_bne', 'PlanTL-GOB-ES/roberta-base-bne',
+        X_train_texts, y_train, X_val_texts, y_val, X_test_texts, y_test,
+        epochs=1, # Usar 1 época para un ensayo rápido
+        batch_size=8 # Usar un batch size pequeño si la VRAM es limitada
+    )
+    results_log.append(transformer_result)
+    df_results = pd.DataFrame(results_log)
+    df_results.to_csv(RESULTS_CSV_PATH, index=False)
+except Exception as e:
+    logging.error(f"FALLÓ el experimento RoBERTa: {e}")
+
+5. Análisis de Resultados
+Una vez que todos los experimentos han finalizado, cargamos el archivo de registro y analizamos los resultados para sacar conclusiones.
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+try:
+    df_final_results = pd.read_csv(RESULTS_CSV_PATH)
+    df_final_results = df_final_results.sort_values(by='f1_macro', ascending=False).reset_index(drop=True)
+    
+    print("--- Tabla de Clasificación de Experimentos ---")
+    display(df_final_results)
+
+    # --- Visualización de Resultados ---
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x='f1_macro', y='name', data=df_final_results, palette='viridis')
+    plt.title('Comparativa de F1-Score (Macro) por Experimento', fontsize=16)
+    plt.xlabel('F1-Score (Macro)', fontsize=12)
+    plt.ylabel('Experimento', fontsize=12)
+    plt.xlim(0.5, 1.0)
+    plt.show()
+
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x='training_time_seconds', y='name', data=df_final_results, palette='plasma')
+    plt.title('Tiempo de Entrenamiento por Experimento (segundos)', fontsize=16)
+    plt.xlabel('Tiempo (s)', fontsize=12)
+    plt.ylabel('Experimento', fontsize=12)
+    plt.xscale('log') # Usar escala logarítmica por las grandes diferencias
+    plt.show()
+
+except FileNotFoundError:
+    print(f"No se encontró el archivo de resultados {RESULTS_CSV_PATH}. Asegúrate de que los experimentos se ejecutaron.")
+
+
+Conclusiones de la Experimentación
+(Este espacio es para ti)
+ * Vectorizador más efectivo: ¿Qué estrategia de vectorización (TF-IDF, Word2Vec) funcionó mejor en general?
+ * Mejor Clasificador: ¿Qué algoritmo (SVM, RF, LSTM, Transformer) obtuvo el mejor rendimiento?
+ * Trade-off Rendimiento vs. Coste: ¿Justifica el mejor modelo su mayor tiempo de entrenamiento? El RoBERTa probablemente sea el mejor pero también el más lento. ¿Es la ganancia de rendimiento sobre TFIDF-SVM suficiente para justificar el coste?
+ * Mejores Hiperparámetros: ¿Qué se puede aprender de los mejores parámetros encontrados por GridSearchCV? Por ejemplo, ¿los n-gramas (1,2) mejoraron consistentemente el rendimiento del TF-IDF?
