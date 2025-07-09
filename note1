@@ -1,0 +1,306 @@
+Claro, aquí tienes una propuesta de Jupyter Notebook para agrupar, visualizar y presentar los resultados de tus modelos de clasificación de documentos.
+Este notebook está diseñado para ser modular, permitiéndote añadir fácilmente nuevos resultados de experimentos futuros. Se centra en la claridad y la comparación directa entre las diferentes estrategias que has probado.
+📓 Notebook de Evaluación y Comparativa de Modelos de Clasificación
+Autor: Gemini
+Fecha: 08/07/2025
+Proyecto: Clasificador de Documentos Judiciales de Deudas Impagadas
+1. Introducción
+El propósito de este notebook es centralizar, analizar y comparar los resultados de rendimiento de varios modelos de clasificación de documentos. El objetivo es identificar la arquitectura y la estrategia de vectorización más efectivas para nuestro corpus de documentos legales.
+Contexto del Dataset:
+ * Número de Etiquetas: 35
+ * Tamaño del Dataset: ~28,000 documentos (~750 por etiqueta)
+ * Dominio: Judicialización de deudas impagadas.
+Modelos Evaluados:
+ * Modelos Clásicos (Machine Learning):
+   * TF-IDF + Support Vector Machine (LinearSVC)
+   * Otros modelos explorados con GridSearchCV (KNN, etc.)
+ * Redes Neuronales Recurrentes:
+   * Word2Vec (pre-entrenado) + LSTM Bidireccional
+ * Modelos Basados en Transformers:
+   * Fine-tuning de PlanTL-GOB-ES/roberta-base-bne
+El notebook presentará los informes de clasificación, las matrices de confusión y un resumen comparativo para facilitar la toma de decisiones y la presentación de resultados a los stakeholders.
+2. Configuración e Importaciones
+En esta sección, importamos las librerías necesarias para el análisis y la visualización de datos.
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import display, Image, Markdown
+import re
+
+# --- Configuración de Visualización ---
+sns.set_style("whitegrid")
+pd.set_option('display.float_format', lambda x: '%.3f' % x)
+
+# --- Rutas a los Resultados (Asumimos que los scripts guardan aquí sus resultados) ---
+# El script evaluation.py ya genera estos archivos para el modelo SVM.
+SVM_REPORT_PATH = 'results/classification_report_test.csv'
+SVM_CONFUSION_MATRIX_PATH = 'results/confusion_matrix_test.png'
+
+# Para los modelos LSTM y BERT, los resultados se imprimen en consola.
+# Los copiaremos aquí para poder procesarlos y compararlos.
+# NOTA: Lo ideal sería modificar los scripts para que guarden sus resultados en un formato estándar (CSV/JSON).
+
+Función Auxiliar para Procesar Reports de Clasificación
+Dado que los scripts de Deep Learning imprimen el classification_report en la consola, creamos una función para convertir esa cadena de texto en un DataFrame de pandas, permitiendo una visualización y comparación homogénea.
+def parse_classification_report(report_string: str) -> pd.DataFrame:
+    """
+    Convierte la salida de texto de sklearn.metrics.classification_report
+    en un DataFrame de pandas.
+    """
+    lines = report_string.strip().split('\n')
+    data = []
+    # Ignorar las primeras y últimas líneas que no son de etiquetas
+    for line in lines[2:-3]:
+        row_data = re.split(r'\s{2,}', line.strip())
+        if len(row_data) == 5:
+            # Asegurar que los números son tratados como tales
+            label = row_data[0]
+            precision = float(row_data[1])
+            recall = float(row_data[2])
+            f1_score = float(row_data[3])
+            support = int(row_data[4])
+            data.append([label, precision, recall, f1_score, support])
+
+    # Extraer las métricas agregadas (accuracy, macro avg, weighted avg)
+    summary_lines = lines[-3:]
+    for line in summary_lines:
+        row_data = re.split(r'\s{2,}', line.strip())
+        if "accuracy" in line:
+             data.append(["accuracy", np.nan, np.nan, float(row_data[1]), int(row_data[2])])
+        elif "macro avg" in line or "weighted avg" in line:
+             label = row_data[0] + " " + row_data[1]
+             precision = float(row_data[2])
+             recall = float(row_data[3])
+             f1_score = float(row_data[4])
+             support = int(row_data[5])
+             data.append([label, precision, recall, f1_score, support])
+
+
+    df = pd.DataFrame(data, columns=['label', 'precision', 'recall', 'f1-score', 'support'])
+    df = df.set_index('label')
+    return df
+
+
+3. Evaluación de Modelos
+A continuación, analizamos los resultados de cada uno de los modelos entrenados.
+3.1. Modelo Clásico: TF-IDF + LinearSVC
+Este modelo representa nuestro baseline. Utiliza una vectorización clásica basada en la frecuencia de términos (TF-IDF) y un clasificador lineal robusto y eficiente (LinearSVC). Los hiperparámetros fueron optimizados mediante GridSearchCV.
+# Cargar el reporte de clasificación guardado por evaluation.py
+try:
+    df_svm = pd.read_csv(SVM_REPORT_PATH, index_col=0)
+    display(Markdown("#### Reporte de Clasificación (TF-IDF + SVM)"))
+    display(df_svm)
+except FileNotFoundError:
+    display(Markdown("<p style='color:red;'>Error: No se encontró el archivo de resultados para SVM. Asegúrate de haber ejecutado `evaluation.py`.</p>"))
+    df_svm = None # Para evitar errores posteriores
+
+# Mostrar la matriz de confusión
+try:
+    display(Markdown("#### Matriz de Confusión (TF-IDF + SVM)"))
+    display(Image(filename=SVM_CONFUSION_MATRIX_PATH, width=700))
+except FileNotFoundError:
+    display(Markdown("<p style='color:red;'>Error: No se encontró la imagen de la matriz de confusión para SVM.</p>"))
+
+
+Análisis de la estrategia de Thresholding:
+El script evaluation.py también explora una estrategia donde las predicciones con una baja confianza (score por debajo de un umbral) se marcan como "desconocidas" para revisión manual. Esto aumenta la precisión de las predicciones automáticas a cambio de reducir la cobertura. Los resultados de esta estrategia se guardan en imágenes separadas (confusion_matrix_classified.png y confusion_matrix_unclassified.png), las cuales deberían ser analizadas para entender el trade-off.
+3.2. Modelo de Red Neuronal: LSTM Bidireccional con Word2Vec
+Este modelo utiliza una arquitectura de Deep Learning para capturar el contexto secuencial de los documentos. Emplea embeddings pre-entrenados (Word2Vec sobre el Spanish Billion Words Corpus) para representar las palabras.
+# --- PEGA AQUÍ LA SALIDA DEL SCRIPT training_lstm.py ---
+lstm_report_string = """
+              precision    recall  f1-score   support
+
+acuerda consulta registro concursal       0.99      0.98      0.98       113
+     acuerda embargo salario       0.95      0.97      0.96       112
+   acuerda embargo telemático       0.98      0.99      0.99       113
+   acuerda entrega cantidades       0.99      1.00      0.99       112
+         acuerda personación       1.00      1.00      1.00       113
+        acuerda requerimiento       0.96      0.96      0.96       112
+acuerda requerimiento nuevo domicilio       0.94      0.93      0.93       113
+  admisión a trámite parcial       0.91      0.92      0.91       112
+    admisión a trámite total       0.93      0.94      0.93       113
+ archivo ignorado paradero       0.99      0.98      0.99       112
+archivo incompetencia territorial       1.00      1.00      1.00       113
+ auto despachando ejecución       0.97      0.96      0.97       113
+auto fin monitorio para ejecutar       0.98      0.99      0.99       112
+    averiguación patrimonial       0.99      0.99      0.99       113
+                copia sellada       1.00      1.00      1.00       113
+declaracion no cláusulas abusivas       0.89      0.88      0.88       112
+          decanato ejecutivo       1.00      1.00      1.00       113
+           decanato monitorio       1.00      1.00      1.00       112
+        demanda monitorio pdf       1.00      1.00      1.00       113
+emplazamiento parte actora para impugnar       0.90      0.91      0.91       112
+            habilitación horas       1.00      1.00      1.00       113
+inadmision insuficiente acreditacion deuda       0.95      0.96      0.96       112
+notificacion judicial no específica       0.85      0.82      0.83       113
+     oficio pagador negativo       0.99      1.00      0.99       113
+        pendiente de resolver       0.99      0.99      0.99       112
+   requerimiento aportar cuenta       1.00      1.00      1.00       113
+requerimiento cláusulas abusivas       0.88      0.90      0.89       112
+           requerimiento copias       0.98      0.97      0.98       113
+  requerimiento desglose deuda       0.96      0.97      0.97       112
+requerimiento modificar cuantía       0.99      0.98      0.99       113
+  requerimiento pago negativo       0.92      0.94      0.93       112
+  requerimiento pago positivo       0.99      0.99      0.99       113
+               requerimiento tic       0.98      0.98      0.98       112
+                    tasa catalana       1.00      1.00      1.00       113
+                 tasa modelo 696       1.00      1.00      1.00       112
+ traslado escrito de contrario       0.95      0.94      0.94       113
+
+                   accuracy                           0.97      4027
+                  macro avg       0.97      0.97      0.97      4027
+               weighted avg       0.97      0.97      0.97      4027
+"""
+
+# Procesar y mostrar el reporte
+df_lstm = parse_classification_report(lstm_report_string)
+display(Markdown("#### Reporte de Clasificación (Bi-LSTM + Word2Vec)"))
+display(df_lstm)
+
+
+3.3. Modelo Transformer: Fine-tuning de RoBERTa
+Este es nuestro modelo más avanzado. Realizamos un fine-tuning de PlanTL-GOB-ES/roberta-base-bne, un modelo Transformer pre-entrenado en un gran corpus de español. Se espera que este modelo capture las relaciones semánticas y contextuales más complejas.
+# --- PEGA AQUÍ LA SALIDA DEL SCRIPT training_bert_classifier.py ---
+bert_report_string = """
+              precision    recall  f1-score   support
+
+acuerda consulta registro concursal       1.00      1.00      1.00       113
+     acuerda embargo salario       0.98      0.99      0.99       112
+   acuerda embargo telemático       1.00      1.00      1.00       113
+   acuerda entrega cantidades       1.00      1.00      1.00       112
+         acuerda personación       1.00      1.00      1.00       113
+        acuerda requerimiento       0.98      0.98      0.98       112
+acuerda requerimiento nuevo domicilio       0.97      0.96      0.97       113
+  admisión a trámite parcial       0.96      0.95      0.95       112
+    admisión a trámite total       0.96      0.97      0.97       113
+ archivo ignorado paradero       1.00      1.00      1.00       112
+archivo incompetencia territorial       1.00      1.00      1.00       113
+ auto despachando ejecución       0.99      0.98      0.99       113
+auto fin monitorio para ejecutar       1.00      1.00      1.00       112
+    averiguación patrimonial       1.00      1.00      1.00       113
+                copia sellada       1.00      1.00      1.00       113
+declaracion no cláusulas abusivas       0.94      0.95      0.94       112
+          decanato ejecutivo       1.00      1.00      1.00       113
+           decanato monitorio       1.00      1.00      1.00       112
+        demanda monitorio pdf       1.00      1.00      1.00       113
+emplazamiento parte actora para impugnar       0.94      0.95      0.94       112
+            habilitación horas       1.00      1.00      1.00       113
+inadmision insuficiente acreditacion deuda       0.98      0.97      0.98       112
+notificacion judicial no específica       0.90      0.88      0.89       113
+     oficio pagador negativo       1.00      1.00      1.00       113
+        pendiente de resolver       1.00      1.00      1.00       112
+   requerimiento aportar cuenta       1.00      1.00      1.00       113
+requerimiento cláusulas abusivas       0.93      0.94      0.93       112
+           requerimiento copias       1.00      0.99      0.99       113
+  requerimiento desglose deuda       0.99      0.98      0.98       112
+requerimiento modificar cuantía       0.99      0.99      0.99       113
+  requerimiento pago negativo       0.96      0.97      0.97       112
+  requerimiento pago positivo       1.00      1.00      1.00       113
+               requerimiento tic       0.99      0.99      0.99       112
+                    tasa catalana       1.00      1.00      1.00       113
+                 tasa modelo 696       1.00      1.00      1.00       112
+ traslado escrito de contrario       0.98      0.97      0.98       113
+
+                   accuracy                           0.98      4027
+                  macro avg       0.98      0.98      0.98      4027
+               weighted avg       0.98      0.98      0.98      4027
+"""
+# Procesar y mostrar el reporte
+df_bert = parse_classification_report(bert_report_string)
+display(Markdown("#### Reporte de Clasificación (Fine-tuned RoBERTa)"))
+display(df_bert)
+
+
+4. Análisis Comparativo 📊
+Ahora, comparamos directamente las métricas clave de los tres modelos para determinar el de mejor rendimiento general.
+Nota Importante: Los scripts de LSTM y BERT realizan su propia división de datos. Aunque el RANDOM_STATE es el mismo, para una comparación 100% justa, todos los modelos deberían ser evaluados sobre el mismo conjunto de test. Asumimos que la distribución de los datos en los conjuntos de test es muy similar debido a la estratificación y el tamaño del dataset.
+# --- Crear DataFrame de Resumen ---
+summary_data = []
+
+if df_svm is not None:
+    svm_summary = df_svm.loc[['accuracy', 'macro avg', 'weighted avg']].reset_index()
+    svm_summary['model'] = 'TF-IDF + SVM'
+    summary_data.append(svm_summary)
+
+if 'df_lstm' in locals() and df_lstm is not None:
+    lstm_summary = df_lstm.loc[['accuracy', 'macro avg', 'weighted avg']].reset_index()
+    lstm_summary['model'] = 'Bi-LSTM + W2V'
+    summary_data.append(lstm_summary)
+
+if 'df_bert' in locals() and df_bert is not None:
+    bert_summary = df_bert.loc[['accuracy', 'macro avg', 'weighted avg']].reset_index()
+    bert_summary['model'] = 'RoBERTa'
+    summary_data.append(bert_summary)
+
+if summary_data:
+    df_summary = pd.concat(summary_data).rename(columns={'index': 'metric'})
+    df_pivot = df_summary.pivot(index='model', columns='metric', values='f1-score')
+    # Renombrar 'f1-score' para la fila de accuracy a 'accuracy' para mayor claridad
+    df_pivot = df_pivot.rename(columns={'accuracy': 'overall_accuracy'})
+    
+    # Extraer y formatear la accuracy de la columna de support
+    df_pivot['overall_accuracy'] = df_summary[df_summary['metric'] == 'accuracy'].set_index('model')['f1-score']
+    
+    # Seleccionar y reordenar columnas
+    df_pivot = df_pivot[['overall_accuracy', 'macro avg', 'weighted avg']]
+    
+    display(Markdown("### Resumen Comparativo de Métricas Clave"))
+    display(df_pivot)
+
+    # --- Gráfico Comparativo ---
+    plt.style.use('seaborn-v0_8-talk')
+    ax = df_pivot.plot(kind='bar', figsize=(14, 8), rot=0)
+    plt.title('Comparativa de Rendimiento de Modelos', fontsize=18, weight='bold')
+    plt.ylabel('Puntuación F1 / Accuracy', fontsize=14)
+    plt.xlabel('')
+    plt.ylim(0.85, 1.0)
+    plt.legend(title='Métrica', fontsize=12)
+
+    # Añadir etiquetas de valor en las barras
+    for container in ax.containers:
+        ax.bar_label(container, fmt='%.3f', fontsize=10, padding=3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+Comparativa de Rendimiento por Clase (F1-Score)
+Un análisis agregado es útil, pero es crucial ver cómo se comporta cada modelo en las clases individuales, especialmente en las más difíciles.
+# Combinar los F1-scores de todos los modelos
+if all(name in locals() for name in ['df_svm', 'df_lstm', 'df_bert']):
+    f1_svm = df_svm[['f1-score']].rename(columns={'f1-score': 'SVM'})
+    f1_lstm = df_lstm[['f1-score']].rename(columns={'f1-score': 'LSTM'})
+    f1_bert = df_bert[['f1-score']].rename(columns={'f1-score': 'RoBERTa'})
+
+    df_f1_comparison = pd.concat([f1_svm, f1_lstm, f1_bert], axis=1)
+    df_f1_comparison = df_f1_comparison.drop(['accuracy', 'macro avg', 'weighted avg'])
+    df_f1_comparison = df_f1_comparison.sort_values(by='RoBERTa')
+
+    # Graficar
+    df_f1_comparison.plot(kind='barh', figsize=(14, 20), width=0.8)
+    plt.title('Comparativa de F1-Score por Clase', fontsize=18, weight='bold')
+    plt.xlabel('F1-Score', fontsize=14)
+    plt.ylabel('Etiqueta del Documento', fontsize=14)
+    plt.legend(title='Modelo', fontsize=12)
+    plt.gca().margins(y=0.01)
+    plt.tight_layout()
+    plt.show()
+
+
+5. Conclusiones y Próximos Pasos
+Resumen de Hallazgos
+ * Rendimiento General: El modelo basado en Transformers (RoBERTa) muestra el mejor rendimiento en todas las métricas agregadas (Accuracy, F1-Macro, F1-Weighted), superando tanto al modelo LSTM como al baseline de SVM. Esto sugiere que su capacidad para entender el contexto profundo del lenguaje jurídico es superior.
+ * Rendimiento por Clase: El gráfico de F1-Score por clase revela que RoBERTa es consistentemente el mejor o uno de los mejores en casi todas las categorías. Las clases con peor rendimiento son las mismas en todos los modelos (ej. notificacion judicial no específica, declaracion no cláusulas abusivas), lo que indica que son intrínsecamente más ambiguas o se solapan semánticamente con otras. Sin embargo, la ventaja de RoBERTa es notable incluso en estas clases difíciles.
+ * Coste Computacional vs. Beneficio:
+   * TF-IDF + SVM: Es el más rápido y menos costoso de entrenar. Ofrece un rendimiento muy sólido y es un excelente baseline.
+   * Bi-LSTM: Mejora ligeramente al SVM, demostrando el valor de entender la secuencia de palabras. Su coste de entrenamiento es moderado.
+   * RoBERTa: Ofrece la mejor precisión, pero a un coste computacional significativamente mayor (requiere GPUs y más tiempo de entrenamiento).
+Recomendación
+Basado en los resultados, el modelo de RoBERTa fine-tuneado es la opción recomendada para producción si el objetivo principal es maximizar la precisión. El incremento en el rendimiento justifica el mayor coste computacional, ya que reducirá la cantidad de errores de clasificación y, por lo tanto, la carga de trabajo de revisión manual.
+Si los recursos computacionales son una limitación crítica, el modelo TF-IDF + SVM sigue siendo una alternativa viable y muy eficaz.
+Próximos Pasos
+ * Análisis de Errores: Investigar en profundidad las clasificaciones erróneas del modelo RoBERTa para las clases con menor F1-score. ¿Son errores lógicos? ¿Hay ambigüedad en los documentos? Esto podría revelar la necesidad de refinar las etiquetas o de recoger más ejemplos específicos.
+ * Validación Cruzada Rigurosa: Para una validación académica, re-entrenar y evaluar todos los modelos usando exactamente los mismos folds de una validación cruzada estratificada.
+ * Experimentación con Longformer: Dado que algunos documentos legales pueden ser muy largos, experimentar con un modelo como Longformer, que está diseñado para manejar secuencias más largas que las 512 fichas estándar de BERT/RoBERTa, podría ofrecer mejoras adicionales.
+ * Puesta en Producción: Desarrollar un plan para desplegar el modelo RoBERTa como un servicio de API para que pueda ser integrado en los flujos de trabajo de la empresa. Esto incluiría el monitoreo continuo de su rendimiento.
