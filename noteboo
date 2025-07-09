@@ -1,0 +1,1560 @@
+Estoy trabajando en un clasificador de documentos legales para mi empresa. El ámbito del mismo es la judicialización
+de deudas impagadas. Ahora mismo estamos trabajando únicamente con documentos de 35 etiquetas distintas y ahora mismo 
+tenemos tratados unos  750 documentos por cada etiqueta, es decir unos 28 k documentos. Te voy a pasar los scripts de 
+preprocessing.py donde realizo la transformación de los documentos pdf a md y guardo las rutas y las etiquetas en un excel. Este script de momento no lo necesitas para nada, solo para hacerte una idea de como construyo el dataset.
+Voy a darte también los scripts de entrenamiento training.py donde ensayo distintas técnicas de vectorización y de 
+clasificación para comprobar cual es la que mejor se comporta. En este script uso técnicas como grid_search para explorar los parámetros óptimos para cada combinación. luego tengo un script de evaluation.py donde evalúo con el conjunto de test el modelo generado en training.py. en "evaluation" ensayo alguna estrategia como el uso de un threshold para comprobar la performance si solo se otorgan etiquetas con alta puntuación. Por otro lado tengo otros dos scripts llamados training_lstm.py y training_bert_classifier.py, en esos dos script se entrena una red neuronal y un modelo transformer fine-tuneado para ver su performance de la clasificación de documentos. en estos scripts esta integrado la evaluación del conjunto de test. Quiero que me prepares un jupyter notebook para facilitar la visualización de los resultados de cada una de las combinaciones, el fin de este notebook es tener agrupados todos los resultados y poder añadir nuevas estrategias y además poder presentar los resultados a mis superiores. además de los reports todas las graficas que creas útiles también puedes incluirlas. 
+
+preprocessing.py:
+
+
+import os
+import subprocess
+import pandas as pd
+from pathlib import Path
+import argparse
+import logging
+import re
+from pypdf import PdfReader, PdfWriter # Importar pypdf
+import shutil # Para manejo de archivos/carpetas temporales
+from tqdm import tqdm
+import tempfile # Necesario para las funciones de Azure
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ---
+
+# Asegúrate de que estos nombres coincidan EXACTAMENTE con tus carpetas en data/raw/
+# y con las etiquetas deseadas.
+LABEL_MAP = {
+    'admision_a_tramite_parcial': 'admisión a trámite parcial',
+    'admision_a_tramite_total': 'admisión a trámite total',
+    'acuerda_consulta_registro_concursal': 'acuerda consulta registro concursal',
+    'acuerda_embargo_salario': 'acuerda embargo salario',
+    'acuerda_embargo_telematico': 'acuerda embargo telemático',
+    'acuerda_entrega_cantidades': 'acuerda entrega cantidades',
+    'acuerda_personacion': 'acuerda personación',
+    'acuerda_requerimiento': 'acuerda requerimiento',
+    'acuerda_requerimiento_nuevo_domicilio': 'acuerda requerimiento nuevo domicilio',
+    'archivo_ignorado_paradero': 'archivo ignorado paradero',
+    'archivo_incompetencia_territorial': 'archivo incompetencia territorial',
+    'auto_despachando_ejecucion': 'auto despachando ejecución',
+    'auto_fin_monitorio_para_ejecutar': 'auto fin monitorio para ejecutar',
+    'averiguacion_patrimonial': 'averiguación patrimonial',
+    'declaracion_no_clausulas_abusivas': 'declaracion no cláusulas abusivas',
+    'decanato_monitorio': 'decanato monitorio',
+    'decanato_ejecutivo': 'decanato ejecutivo',
+    'demanda_monitorio_pdf': 'demanda monitorio pdf',
+    'emplazamiento_parte_actora_para_impugnar': 'emplazamiento parte actora para impugnar',
+    'habilitacion_horas': 'habilitación horas',
+    'inadmision_insuficiente_acreditacion_deuda': 'inadmision insuficiente acreditacion deuda',
+    'pendiente_de_resolver': 'pendiente de resolver',
+    'oficio_pagador_negativo': 'oficio pagador negativo',
+    'notificacion_judicial_no_especifica': 'notificacion judicial no específica',
+    'requerimiento_aportar_cuenta': 'requerimiento aportar cuenta',
+    'requerimiento_modificar_cuantia': 'requerimiento modificar cuantía',
+    'requerimiento_copias': 'requerimiento copias',
+    'requerimiento_desglose_deuda': 'requerimiento desglose deuda',
+    'requerimiento_clausulas_abusivas': 'requerimiento cláusulas abusivas',
+    'requerimiento_pago_negativo': 'requerimiento pago negativo',
+    'requerimiento_pago_positivo': 'requerimiento pago positivo',
+    'requerimiento_tic': 'requerimiento tic',
+    'tasa_modelo_696': 'tasa modelo 696',
+    'tasa_catalana': 'tasa catalana',
+    'traslado_escrito_de_contrario': 'traslado escrito de contrario',
+    'copia_sellada': 'copia sellada',  
+}
+
+BASE_DATA_PATH = Path('data')
+RAW_FOLDER = BASE_DATA_PATH / 'raw_2'
+PROCESSED_FOLDER = BASE_DATA_PATH / 'processed_2'
+# Directorio para PDFs temporales (sin las páginas de LexNET)
+TEMP_PDF_FOLDER = PROCESSED_FOLDER / 'temp'
+LABELED_FOLDER = BASE_DATA_PATH / 'labeled'
+OUTPUT_CSV = LABELED_FOLDER / 'labeled_documents_35_lexnet.csv'
+
+
+# Literal a buscar para eliminar página (ajusta si es necesario, ej. case-insensitive)
+LEXNET_MARKER = "Mensaje LexNET -"
+# Considerar hacerlo case-insensitive:
+# LEXNET_MARKER_LOWER = "mensaje lexnet -"
+# Contador global para contabilizar cuántas páginas pasan por OCR en tu script  
+ocr_pages_counter = 0  # Inicializa al principio del script
+# --- Funciones Azure ---
+
+# >>> INICIO: Pega aquí tus 4 funciones de Azure <<<
+def create_azure_client(endpoint, key):
+    """ Crea y retorna un cliente de Azure Document Intelligence. """
+    ...
+
+def analyze_document_read(client, file_path):
+    """ Analiza un documento con el modelo read. """
+    ...
+
+def is_anomalous_text(text):
+    """Detecta si el texto extraído es anómalo."""
+    ...
+
+def process_pages_with_ocr(anomalous_pages_indices, reader, client):
+    """Procesa un grupo de páginas anómalas con OCR y retorna el texto extraído."""
+    ...
+
+
+def get_definitive_text(pdf_path, azure_client):
+    """
+    Obtiene el texto definitivo de un PDF, usando Azure OCR como fallback.
+    También filtra internamente las páginas que contienen el marcador LexNET.
+    Retorna una única cadena con el texto completo del documento.
+    """
+    ...
+
+
+def clean_text(text):
+    """Limpia el texto de Markdown: quita saltos de línea excesivos, etc."""
+    ...
+
+# --- Función para crear PDF sin páginas LexNET (para el flujo Markitdown) ---
+def create_pdf_without_lexnet(input_pdf_path, output_pdf_path):
+    """
+    Crea una copia de un PDF eliminando solo las páginas con el marcador LexNET.
+    Usa únicamente pypdf para la detección de texto. No usa OCR.
+    """
+    ...
+
+def remove_lexnet_pages(input_pdf_path, output_pdf_path, azure_client=None):
+    """
+    Lee un PDF. Para cada página:
+    1. Intenta extraer texto con pypdf.
+    2. Si el texto es anómalo Y hay cliente de Azure, marca la página para OCR.
+    3. Procesa en lote las páginas anómalas con Azure.
+    4. Reconstruye el texto completo del documento.
+    5. Elimina las páginas que contienen el marcador LexNET (basado en el texto final).
+    6. Guarda el PDF resultante sin las páginas LexNET.
+    """
+    ...
+
+def convert_pdf_to_md(pdf_path, output_dir, desired_md_stem):
+    """
+    Convierte un PDF (posiblemente temporal) a Markdown usando 'markitdown'.
+    El archivo .md resultante tendrá el nombre basado en desired_md_stem.
+    """
+    ...
+
+def process_folder(raw_folder_path, processed_folder, temp_pdf_folder, label, azure_client=None):
+    """
+    Procesa PDFs: elimina páginas LexNET (temporal), convierte a MD, lee y asigna etiqueta.
+    """
+    if not raw_folder_path.is_dir():
+        logging.warning(f"La carpeta de entrada no existe: {raw_folder_path}")
+        return []
+
+    data = []
+    pdf_files = [f for f in raw_folder_path.iterdir() if f.is_file() and f.suffix.lower() == '.pdf']
+    logging.info(f"Encontrados {len(pdf_files)} archivos PDF en {raw_folder_path}")
+
+    if not pdf_files:
+        logging.warning(f"No se encontraron archivos PDF en: {raw_folder_path}")
+        return []
+
+    temp_pdf_folder.mkdir(parents=True, exist_ok=True) # Asegura que exista temp/
+
+    for pdf_file in tqdm(pdf_files, desc=f"Processing {label}"):
+        logging.info(f"Procesando archivo: {pdf_file.name}")
+        original_stem = pdf_file.stem # Guardar el nombre base original
+        # Ruta para el PDF temporal (sin páginas LexNET)
+        md_final_path = processed_folder / f"{original_stem}.md"
+        #temp_pdf_path = temp_pdf_folder / f"{original_stem}_temp.pdf"
+
+        # --- Decisión: ¿Este PDF necesita OCR o puede usar Markitdown? ---
+        # Verificamos si alguna página es anómala ANTES de decidir el camino.
+        needs_ocr = False
+        if azure_client:
+            try:
+                reader = PdfReader(pdf_file)
+                for page in reader.pages:
+                    if is_anomalous_text(page.extract_text()):
+                        needs_ocr = True
+                        break # Encontramos una, es suficiente para decidir
+            except Exception as e:
+                logging.error(f"No se pudo pre-analizar '{pdf_file.name}' para decidir ruta. Se usará Markitdown por defecto. Error: {e}")
+
+        final_text = None
+        # --- RUTA 1: Se necesita OCR ---
+        if needs_ocr:
+            logging.info(f"'{pdf_file.name}' es anómalo. Usando ruta de extracción directa con OCR de Azure.")
+            # Obtenemos el texto definitivo, que ya viene filtrado de páginas LexNET
+            final_text = get_definitive_text(pdf_file, azure_client)
+            # No se necesita markitdown ni PDF temporal. El texto es el producto final.
+
+        # --- RUTA 2: PDF normal, usar Markitdown ---
+        else:
+            logging.info(f"'{pdf_file.name}' parece normal. Usando ruta de Markitdown.")
+            temp_pdf_path = temp_pdf_folder / f"{original_stem}_temp.pdf"
+            
+            # 1. Crear PDF temporal sin páginas LexNET
+            if create_pdf_without_lexnet(pdf_file, temp_pdf_path):
+                # 2. Convertir el PDF temporal a MD
+                md_path_from_converter = convert_pdf_to_md(temp_pdf_path, processed_folder, original_stem)
+                # 3. Limpiar el temporal
+                temp_pdf_path.unlink(missing_ok=True)
+                
+                # 4. Leer el texto del MD generado para tenerlo en la variable 'final_text'
+                if md_path_from_converter:
+                    try:
+                        with open(md_path_from_converter, 'r', encoding='utf-8') as f:
+                           final_text = f.read()
+                    except Exception as e:
+                        logging.error(f"No se pudo leer el MD generado por Markitdown para '{pdf_file.name}': {e}")
+
+        # --- Paso final común: Limpiar y guardar el texto en el archivo .md ---
+        if final_text is not None:
+            # Aplicar limpieza final y guardar
+            cleaned_text = clean_text(final_text)
+            if not cleaned_text:
+                logging.warning(f"El contenido del archivo {md_final_path.name} quedó vacío después de la limpieza.")
+            try:
+                with open(md_final_path, 'w', encoding='utf-8') as f:
+                    f.write(cleaned_text)
+                logging.info(f"Archivo final '{md_final_path.name}' guardado/sobrescrito.")
+                
+                # Añadir la ruta a la lista de datos para el CSV
+                data.append({
+                    'source_pdf': pdf_file.name,
+                    'markdown_file': md_final_path.name,
+                    'markdown_path': str(md_final_path),                                   
+                    'cleaned_text_length': len(cleaned_text),
+                    'label': label
+                })
+
+            except Exception as e:
+                logging.error(f"Error al guardar el MD final '{md_final_path.name}': {e}")
+        else:
+            logging.warning(f"No se pudo generar contenido final para '{pdf_file.name}'. No se creará archivo .md ni se añadirá al dataset.")
+    
+    return data
+
+
+# --- Script Principal ---
+def main():
+    logging.info("--- Iniciando Script de Preprocesamiento (con filtro LexNET) ---")
+    # Crear directorios de salida principales si no existen
+    PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
+    LABELED_FOLDER.mkdir(parents=True, exist_ok=True)
+    # Limpiar/crear carpeta temporal de PDFs
+    if TEMP_PDF_FOLDER.exists():
+        logging.info(f"Limpiando directorio temporal de PDFs: {TEMP_PDF_FOLDER}")
+        shutil.rmtree(TEMP_PDF_FOLDER)
+    TEMP_PDF_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    global ocr_pages_counter  # Declara que se usará la variable global
+
+    # --- NUEVO: Carga de credenciales y creación del cliente de Azure ---
+    azure_client = None
+    endpoint = os.getenv("AZURE_DI_ENDPOINT")
+    key = os.getenv("AZURE_DI_API_KEY")
+
+    if endpoint and key:
+        logging.info("Credenciales de Azure encontradas en las variables de entorno.")
+        try:
+            azure_client = create_azure_client(endpoint, key)
+        except Exception as e:
+            logging.error(f"No se pudo crear el cliente de Azure. El OCR no estará disponible. Error: {e}")
+    else:
+        logging.warning("No se encontraron las variables de entorno AZURE_DI_ENDPOINT o AZURE_DI_KEY.")
+        logging.warning("El script se ejecutará sin la capacidad de OCR para páginas escaneadas/cifradas.")
+
+
+    all_data = []
+    found_folders = 0
+
+    for folder_name, label in LABEL_MAP.items():
+        raw_folder_path = RAW_FOLDER / folder_name
+        if raw_folder_path.is_dir():
+            found_folders += 1
+            logging.info(f"\nProcesando carpeta: {raw_folder_path} para etiqueta: '{label}'")
+            # Pasar la ruta a la carpeta temporal
+            folder_data = process_folder(raw_folder_path, PROCESSED_FOLDER, TEMP_PDF_FOLDER, label, azure_client)
+            all_data.extend(folder_data)
+            logging.info(f"Procesados {len(folder_data)} documentos de la carpeta {folder_name}.")
+        else:
+            logging.warning(f"Carpeta no encontrada, saltando: {raw_folder_path}")
+
+    logging.info(f"Total de páginas enviadas a OCR: {ocr_pages_counter}")
+
+    # (Resto de la función main sin cambios: comprobaciones, guardado de CSV)
+    if found_folders == 0:
+        logging.error("¡Error Crítico! No se encontró ninguna de las carpetas esperadas en data/raw/.")
+        return
+
+    if not all_data:
+         logging.error("¡Error Crítico! No se procesó ningún documento correctamente.")
+         logging.error("Revisa los logs anteriores para ver posibles errores de conversión o lectura.")
+         return
+
+    # Crear un DataFrame y guardarlo
+    df = pd.DataFrame(all_data)
+
+    # Verificar si hay textos vacíos después de la limpieza
+    empty_texts = df[df['cleaned_text_length'] == 0].shape[0]
+    if empty_texts > 0:
+        logging.warning(f"{empty_texts} documentos resultaron con texto vacío después de la limpieza.")
+        # Opcional: eliminar filas con texto vacío
+        df = df[df['cleaned_text_length'] != 0]
+        logging.info(f"Eliminadas {empty_texts} filas con texto vacío.")
+
+    if df.empty:
+        logging.error("El DataFrame final está vacío. No se guardará ningún archivo CSV.")
+        return
+
+    try:
+        df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8')
+        logging.info(f"\nDatos procesados y guardados exitosamente en: {OUTPUT_CSV}")
+        logging.info(f"Total de documentos procesados: {len(df)}")
+        logging.info("Distribución de etiquetas:")
+        logging.info(f"\n{df['label'].value_counts()}")
+    except Exception as e:
+        logging.error(f"Error al guardar el archivo CSV en {OUTPUT_CSV}: {e}")
+
+    logging.info("--- Script de Preprocesamiento Finalizado ---")
+
+
+if __name__ == "__main__":
+    main()
+
+
+trainin_lstm.py
+
+import pandas as pd
+import os
+from pathlib import Path
+import logging
+import numpy as np
+import joblib
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from training import load_texts, load_data # Asumiendo que la definiste en training.py
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.callbacks import EarlyStopping
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Importar gensim para cargar el modelo Word2Vec
+import gensim
+from gensim.models import KeyedVectors
+
+from transformers import AutoTokenizer, TFAutoModel
+tokenizer = AutoTokenizer.from_pretrained("dccuchile/bert-base-spanish-wwm-cased")
+model = TFAutoModel.from_pretrained("dccuchile/bert-base-spanish-wwm-cased")
+
+#os.environ["TF_XLA_FLAGS"]="--xla_disable_jit"
+
+# Desactivar JIT compilation
+#tf.config.optimizer.set_jit(False)
+#os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Esto desactiva el uso de GPU
+# Verificar la versión de CUDA
+cuda_version = tf.sysconfig.get_build_info()['cuda_version']
+print("CUDA version:", cuda_version)
+
+# Verificar la versión de cuDNN
+cudnn_version = tf.sysconfig.get_build_info()['cudnn_version']
+print("cuDNN version:", cudnn_version)
+# List physical devices
+physical_devices = tf.config.list_physical_devices('GPU')
+if physical_devices:
+    print("GPUs available: ", len(physical_devices))
+    for gpu in physical_devices:
+        print("GPU: ", gpu)
+else:
+    print("No GPUs found.")
+print(tf.__version__)
+
+# Constantes
+LABELED_DATA_PATH = Path('data/labeled/labeled_documents_36_750.csv')
+SBW_VECTORS_PATH = Path('models/sbw_vectors.bin')
+MAX_NUM_WORDS = 30000
+MAX_SEQUENCE_LENGTH = 700  # longitud máxima del texto truncado/padeado
+EMBEDDING_DIM = 300
+EPOCHS = 10
+BATCH_SIZE = 32
+
+# Parámetros del Modelo y División
+TEST_SIZE = 0.15  # 15% para el conjunto de prueba final
+VALIDATION_SIZE = 0.15 # 15% del total original para validación (aprox 0.1765 de lo que queda después del test split)
+RANDOM_STATE = 42 # Para reproducibilidad
+
+# --- Cargar datos (con tus funciones previas) ---
+df = load_data(LABELED_DATA_PATH)
+if df is None:
+    raise SystemExit("No se pudieron cargar los datos")
+
+df['label_id'] = LabelEncoder().fit_transform(df['label'])
+label_mapping = dict(enumerate(df['label'].astype('category').cat.categories))
+
+# --- Dividir rutas y etiquetas ---
+X_paths = df['markdown_path']
+y = df['label_id']
+
+X_train_paths, X_test_paths, y_train_val, y_test = train_test_split(
+    X_paths, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
+)
+val_size_relative = VALIDATION_SIZE / (1.0 - TEST_SIZE)
+X_train_paths, X_val_paths, y_train, y_val = train_test_split(
+    X_train_paths, y_train_val, test_size=val_size_relative,
+    random_state=RANDOM_STATE, stratify=y_train_val
+)
+
+# --- Cargar texto crudo ---
+X_train_texts = load_texts(X_train_paths)
+X_val_texts = load_texts(X_val_paths)
+X_test_texts = load_texts(X_test_paths)
+
+# --- Tokenización ---
+tokenizer = Tokenizer(num_words=MAX_NUM_WORDS, oov_token="<OOV>")
+tokenizer.fit_on_texts(X_train_texts)
+
+'''
+# word_counts es un OrderedDict: palabra -> frecuencia
+word_counts = tokenizer.word_counts
+words = list(word_counts.keys())
+frequencies = np.array(list(word_counts.values()))
+
+# Ordenar por frecuencia descendente
+sorted_indices = np.argsort(frequencies)[::-1]
+sorted_freqs = frequencies[sorted_indices]
+sorted_words = np.array(words)[sorted_indices]
+
+# Frecuencia acumulada normalizada (entre 0 y 1)
+cumulative_freq = np.cumsum(sorted_freqs) / np.sum(sorted_freqs)
+
+# Gráfico de frecuencia acumulada
+plt.figure(figsize=(12, 6))
+plt.plot(cumulative_freq, label="Frecuencia acumulada")
+plt.xlabel("Número de palabras")
+plt.ylabel("Proporción del corpus cubierto")
+plt.title("Frecuencia acumulada de palabras en el corpus")
+plt.grid(True)
+plt.legend()
+
+# Línea vertical: cuántas palabras cubren el 95% del corpus
+threshold = 0.98
+num_words_95 = np.argmax(cumulative_freq >= threshold) + 1
+plt.axvline(num_words_95, color='r', linestyle='--', label=f"95% cobertura: {num_words_95} palabras")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+# Guarda la gráfica como un archivo
+plt.savefig('grafica_ejemplo.png')
+'''
+
+# --- Cargar Word2Vec y crear matriz de embeddings ---
+print("Cargando modelo Word2Vec...")
+try:
+    # Carga el modelo Word2Vec. Asegúrate de que el formato sea correcto (binary=True para .bin)
+    word2vec_model = KeyedVectors.load_word2vec_format(SBW_VECTORS_PATH, binary=True)
+    print("Modelo Word2Vec cargado exitosamente.")
+except Exception as e:
+    print(f"Error al cargar el modelo Word2Vec: {e}")
+    raise SystemExit("No se pudo cargar el modelo Word2Vec. Asegúrate de que la ruta y el formato son correctos.")
+
+# Crear la matriz de embeddings
+# La dimensión de entrada (input_dim) para la capa Embedding debe ser MAX_NUM_WORDS (o len(tokenizer.word_index) + 1)
+# y la dimensión de salida (output_dim) debe ser EMBEDDING_DIM.
+embedding_matrix = np.zeros((MAX_NUM_WORDS, EMBEDDING_DIM))
+for word, i in tokenizer.word_index.items():
+    if i < MAX_NUM_WORDS:
+        if word in word2vec_model:
+            embedding_matrix[i] = word2vec_model[word]
+        # Si la palabra no está en el modelo Word2Vec, el vector se mantiene como ceros
+        # Puedes optar por inicializarlo aleatoriamente si lo prefieres:
+        # else:
+        #     embedding_matrix[i] = np.random.uniform(-0.25, 0.25, EMBEDDING_DIM)
+#embedding_matrix[tokenizer.word_index["<OOV>"]] = np.random.normal(scale=0.6, size=(EMBEDDING_DIM,))
+
+X_train_seq = pad_sequences(tokenizer.texts_to_sequences(X_train_texts), maxlen=MAX_SEQUENCE_LENGTH)
+X_val_seq = pad_sequences(tokenizer.texts_to_sequences(X_val_texts), maxlen=MAX_SEQUENCE_LENGTH)
+X_test_seq = pad_sequences(tokenizer.texts_to_sequences(X_test_texts), maxlen=MAX_SEQUENCE_LENGTH)
+
+# One-hot: y_train es 2D
+print(y_train.shape)  # (n, num_classes)
+
+# Índices: y_train es 1D
+print(np.unique(y_train[:10]))  # [0 1 2 ...]
+
+# --- One-hot en etiquetas ---
+num_classes = len(set(y))
+y_train_cat = to_categorical(y_train, num_classes=num_classes)
+y_val_cat = to_categorical(y_val, num_classes=num_classes)
+y_test_cat = to_categorical(y_test, num_classes=num_classes)
+
+# --- Modelo LSTM ---
+model = Sequential([
+    Embedding(input_dim=MAX_NUM_WORDS, output_dim=EMBEDDING_DIM,
+              weights=[embedding_matrix], # Aquí se pasan los embeddings pre-entrenados
+              input_length=MAX_SEQUENCE_LENGTH, # Especifica la longitud de la secuencia de entrada
+              trainable=True),   # input_length=MAX_SEQUENCE_LENGTH  (deprecated)
+    Bidirectional(LSTM(128, return_sequences=False)),
+    Dropout(0.3),
+    Dense(64, activation='relu'),
+    Dropout(0.5),
+    Dense(num_classes, activation='softmax')
+])
+
+model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+model.summary()
+
+# --- Entrenamiento ---
+early_stop = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+history = model.fit(
+    X_train_seq, y_train_cat,
+    validation_data=(X_val_seq, y_val_cat),
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    callbacks=[EarlyStopping(monitor='val_loss', patience=2, restore_best_weights=True)]
+)
+
+# --- Evaluación ---
+test_loss, test_acc = model.evaluate(X_test_seq, y_test_cat)
+print(f"Accuracy en test: {test_acc:.4f}")
+
+# Predicciones y reporte
+y_pred = model.predict(X_test_seq, batch_size=BATCH_SIZE)
+y_pred_labels = np.argmax(y_pred, axis=1)
+
+from sklearn.metrics import classification_report
+print(classification_report(y_test, y_pred_labels, target_names=label_mapping.values()))
+
+model.save('models/lstm_model/lstm_legal_classifier.keras')
+joblib.dump(tokenizer, 'models/lstm_model/tokenizer.joblib')
+
+training_bert_classifier.py
+
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, EarlyStoppingCallback
+from transformers import create_optimizer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.utils import to_categorical
+import tensorflow as tf
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from training import load_texts, load_data # Asumiendo que la definiste en training.py
+from datasets import Dataset
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, precision_recall_fscore_support, accuracy_score
+import torch
+from torch.nn import CrossEntropyLoss
+from sklearn.utils.class_weight import compute_class_weight
+
+LABELED_DATA_PATH = Path('data/labeled/labeled_documents_36_750.csv')
+# Parámetros del Modelo y División
+TEST_SIZE = 0.15  # 15% para el conjunto de prueba final
+VALIDATION_SIZE = 0.15 # 15% del total original para validación (aprox 0.1765 de lo que queda después del test split)
+RANDOM_STATE = 42 # Para reproducibilidad
+MAX_LENGTH=512
+
+# --- Tokenizador y Dataset ---
+#MODEL_NAME = "bert-base-multilingual-cased"
+MODEL_NAME = "PlanTL-GOB-ES/roberta-base-bne"
+#MODEL_NAME = "allenai/longformer-base-4096"
+
+# --- Cargar datos ---
+df = load_data(LABELED_DATA_PATH)
+if df is None:
+    raise SystemExit("No se pudieron cargar los datos")
+
+# Codificar etiquetas
+le = LabelEncoder()
+df['label_id'] = le.fit_transform(df['label'])
+label_mapping = dict(enumerate(le.classes_))
+
+# Dividir conjunto
+from sklearn.model_selection import train_test_split
+
+X_paths = df['markdown_path']
+y = df['label_id']
+
+X_train_paths, X_test_paths, y_train_val, y_test = train_test_split(
+    X_paths, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
+)
+val_size_relative = VALIDATION_SIZE / (1.0 - TEST_SIZE)
+X_train_paths, X_val_paths, y_train, y_val = train_test_split(
+    X_train_paths, y_train_val, test_size=val_size_relative,
+    random_state=RANDOM_STATE, stratify=y_train_val
+)
+
+X_train_texts = load_texts(X_train_paths)
+X_val_texts = load_texts(X_val_paths)
+X_test_texts = load_texts(X_test_paths)
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+
+def smart_truncate(text, tokenizer, max_len=512, return_ids=False):
+    encoding = tokenizer.encode_plus(
+        text,
+        add_special_tokens=False,
+        return_attention_mask=False,
+        return_token_type_ids=False
+        # ⚠️ NO usar add_prefix_space aquí
+    )
+
+    input_ids = encoding["input_ids"]
+
+    head = input_ids[:max_len // 2]
+    tail = input_ids[-(max_len // 2):]
+    truncated_ids = head + tail
+    truncated_ids = input_ids
+    if return_ids:
+        return truncated_ids
+    else:
+        return tokenizer.decode(truncated_ids, skip_special_tokens=True)
+
+# Aplicarlo antes de tokenizar
+X_train_texts = [smart_truncate(t, tokenizer) for t in X_train_texts]
+X_val_texts = [smart_truncate(t, tokenizer) for t in X_val_texts]
+X_test_texts = [smart_truncate(t, tokenizer) for t in X_test_texts]
+
+
+train_dataset = Dataset.from_dict({"text": X_train_texts, "label": y_train})
+val_dataset = Dataset.from_dict({"text": X_val_texts, "label": y_val})
+test_dataset = Dataset.from_dict({"text": X_test_texts, "label": y_test})
+
+# --- Tokenizar datasets ---
+def tokenize_batch(example):
+    return tokenizer(example["text"], padding="max_length", truncation=True, max_length=MAX_LENGTH)
+
+train_dataset = train_dataset.map(tokenize_batch, batched=True)
+val_dataset = val_dataset.map(tokenize_batch, batched=True)
+test_dataset = test_dataset.map(tokenize_batch, batched=True)
+
+# --- Convertir a tensores ---
+columns = ['input_ids', 'attention_mask', 'label']
+train_dataset.set_format(type='torch', columns=columns)
+val_dataset.set_format(type='torch', columns=columns)
+test_dataset.set_format(type='torch', columns=columns)
+
+# --- Modelo ---
+num_labels = len(le.classes_)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=num_labels)
+
+# --- Entrenamiento ---
+training_args = TrainingArguments(
+    output_dir="./models/bert_model//bert_classifier",
+    eval_strategy="epoch",
+    save_strategy="epoch",
+    per_device_train_batch_size=32,
+    per_device_eval_batch_size=32,
+    gradient_accumulation_steps=1,
+    num_train_epochs=8,
+    learning_rate=3e-5,
+    weight_decay=0.01,
+    warmup_ratio=0.1,  # Warmup para estabilizar
+    logging_dir='./logs',
+    logging_steps=10,
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss"
+)
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    preds = np.argmax(logits, axis=-1)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='weighted')
+    acc = accuracy_score(labels, preds)
+    return {"accuracy": acc, "precision": precision, "recall": recall, "f1": f1}
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+    compute_metrics=compute_metrics,
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
+)
+
+class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+class_weights = torch.tensor(class_weights, dtype=torch.float).to(model.device)
+
+def custom_compute_loss(model, inputs, return_outputs=False, **kwargs):
+    labels = inputs.pop("labels")
+    outputs = model(**inputs)
+    logits = outputs.logits
+    loss_fct = CrossEntropyLoss()
+    loss = loss_fct(logits, labels)
+    return (loss, outputs) if return_outputs else loss
+
+trainer.compute_loss = custom_compute_loss
+
+trainer.train()
+
+# --- Evaluación ---
+preds = trainer.predict(test_dataset)
+y_pred = preds.predictions.argmax(axis=-1)
+print(classification_report(y_test, y_pred, target_names=le.classes_))
+
+
+training.py
+
+
+import pandas as pd
+from pathlib import Path
+import torch
+import joblib
+import logging
+import re
+#from sentence_transformers import SentenceTransformer
+from xgboost import XGBClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.feature_selection import SelectKBest, chi2
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC, SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.utils import class_weight
+from sentence_transformers import SentenceTransformer
+from sklearn.base import BaseEstimator, TransformerMixin
+from gensim.models import KeyedVectors
+from gensim.utils import simple_preprocess
+import numpy as np
+import nltk
+nltk.download('punkt')
+from nltk.tokenize import word_tokenize
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ---
+LABELED_DATA_PATH = Path('data/labeled/labeled_documents_35_lexnet.csv')
+MODEL_DIR = Path('models/tfidf_svm')
+MODEL_PATH = MODEL_DIR / 'tfidf_svm_pipeline_lexnet.joblib'
+SBW_VECTORS_PATH = Path('models/sbw_vectors.bin')
+MAPPING_PATH = MODEL_DIR / 'label_mapping_lexnet.joblib'
+TEST_SET_PATH = Path('data/labeled/test_set_lexnet.csv') # Guardaremos el test set para evaluation.py
+TRAINVAL_SET_PATH = Path('data/labeled/train_val_set_lexnet.csv') # Guardaremos train+val temporalmente
+
+# Parámetros del Modelo y División
+TEST_SIZE = 0.15  # 15% para el conjunto de prueba final
+VALIDATION_SIZE = 0.15 # 15% del total original para validación (aprox 0.1765 de lo que queda después del test split)
+RANDOM_STATE = 42 # Para reproducibilidad
+
+# Hiperparámetros del Pipeline (puedes ajustarlos)
+TFIDF_MAX_DF = 0.95
+TFIDF_MIN_DF = 10
+TFIDF_NGRAM_RANGE = (1, 2) # Usar unigramas y bigramas
+SVM_C = 10 # Parámetro de regularización SVM, 1.2 óptimo sin filtrado 
+
+# --- Funciones ---
+
+class SentenceTransformerVectorizer(BaseEstimator, TransformerMixin):
+    def __init__(self, model_name='all-MiniLM-L6-v2', pooling_strategy='mean', device='cpu', batch_size=32):
+        self.model_name = model_name
+        self.pooling_strategy = pooling_strategy
+        self.device = device
+        self.batch_size = batch_size
+        self.model = SentenceTransformer(self.model_name)
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        # Aquí puedes implementar la lógica para el pooling si es necesario
+        embeddings = self.model.encode(X, show_progress_bar=False, convert_to_numpy=True, device=self.device)
+        
+        if self.pooling_strategy == 'mean':
+            return np.mean(embeddings, axis=1, keepdims=True)  # Mantener 2D
+        elif self.pooling_strategy == 'max':
+            return np.max(embeddings, axis=1, keepdims=True)  # Mantener 2D
+        else:
+            return embeddings  # Sin pooling, devuelve los embeddings tal cual
+
+class Word2VecAverager(BaseEstimator, TransformerMixin):
+    def __init__(self, model_path, binary=True):
+        self.model_path = model_path
+        self.binary = binary
+        self.model = None  # importante para que sea serializable con joblib
+
+    def fit(self, X, y=None):
+        if self.model is None:
+            self.model = KeyedVectors.load_word2vec_format(self.model_path, binary=self.binary)
+        return self
+
+    def transform(self, X):
+        vectors = []
+        for doc in X:
+            tokens = simple_preprocess(str(doc))  # se asegura de que el texto esté en string
+            valid_tokens = [token for token in tokens if token in self.model]
+            if valid_tokens:
+                vectors.append(np.mean([self.model[token] for token in valid_tokens], axis=0))
+            else:
+                vectors.append(np.zeros(self.model.vector_size))
+        return np.vstack(vectors)
+
+class TfidfWeightedWord2VecTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, model_path, binary=False):
+        self.model_path = model_path
+        self.binary = binary
+
+    def fit(self, X, y=None):
+        # Cargar modelo Word2Vec preentrenado
+        self.w2v_model = KeyedVectors.load_word2vec_format(self.model_path, binary=self.binary)
+        
+        # Ajustar vectorizador TF-IDF
+        self.tfidf = TfidfVectorizer(tokenizer=simple_preprocess)
+        self.tfidf.fit(X)
+        
+        # Guardar los pesos IDF por palabra
+        self.word2weight = {
+            word: self.tfidf.idf_[i]
+            for word, i in self.tfidf.vocabulary_.items()
+        }
+        return self
+
+    def transform(self, X):
+        transformed_docs = []
+
+        for doc in X:
+            tokens = simple_preprocess(doc)
+            word_vectors = []
+            weights = []
+
+            for word in tokens:
+                if word in self.w2v_model and word in self.word2weight:
+                    word_vectors.append(self.w2v_model[word])
+                    weights.append(self.word2weight[word])
+
+            if word_vectors:
+                weighted_avg = np.average(word_vectors, axis=0, weights=weights)
+            else:
+                weighted_avg = np.zeros(self.w2v_model.vector_size)
+
+            transformed_docs.append(weighted_avg)
+
+        return np.array(transformed_docs)
+
+# --- NUEVA Función Auxiliar ---
+def load_texts(paths, include_procedure=False):
+    """Lee el contenido de archivos de texto desde una lista/serie de rutas."""
+    texts = []
+    logging.info(f"Cargando texto desde {len(paths)} archivos...")
+    for file_path in paths:
+        path_obj = Path(file_path)
+        if not path_obj.is_file():
+            logging.warning(f"Archivo no encontrado al cargar texto: {file_path}. Saltando.")
+            texts.append("") # Añadir string vacío o manejar de otra forma
+            continue
+        try:
+            # Asumimos que los archivos .md fueron guardados como UTF-8 en preprocessing
+            with open(path_obj, 'r', encoding='utf-8') as f:
+                content = f.read()
+                #texts.append(f.read())
+            if include_procedure:
+                procedure = path_obj.stem.split('_')[0]  # e.g. 'MONITORIO'
+                content = f"[PROCEDIMIENTO: {procedure}]\n{content}"
+
+            texts.append(content)    
+        except Exception as e:
+            logging.error(f"Error leyendo archivo {file_path}: {e}")
+            texts.append("") # Añadir string vacío en caso de error
+    logging.info("Carga de textos completada.")
+    return texts
+
+def load_data(file_path):
+    """Carga los datos etiquetados desde un CSV."""
+    if not file_path.exists():
+        logging.error(f"El archivo de datos etiquetados no se encuentra en: {file_path}")
+        logging.error("Asegúrate de haber ejecutado 'python src/preprocessing.py' primero.")
+        return None
+    try:
+        df = pd.read_csv(file_path)
+        # Asegurarse que las columnas necesarias existen y no tienen NaNs
+        required_cols = ['markdown_path', 'label']
+        df.dropna(subset=required_cols, inplace=True)
+        # Convertir a string por si acaso
+        df['markdown_path'] = df['markdown_path'].astype(str)
+        df['label'] = df['label'].astype(str) # Asumimos que train_model manejará la conversión a ID
+
+        logging.info(f"Datos cargados desde {file_path}. Filas: {len(df)}")
+        if df.empty:
+            logging.error("El archivo CSV está vacío o no contiene datos válidos.")
+            return None
+        # Verificar que la columna markdown_path existe
+        if 'markdown_path' not in df.columns:
+             logging.error(f"La columna 'markdown_path' no se encontró en {file_path}")
+             return None
+        return df
+    except Exception as e:
+        logging.error(f"Error cargando el archivo CSV {file_path}: {e}")
+        return None
+
+def train_model(df):
+    """Divide los datos, entrena el modelo y lo guarda."""
+    logging.info("Iniciando proceso de entrenamiento...")
+
+    # Convertir etiquetas a números y guardar mapeo
+    df['label_id'] = df['label'].astype('category').cat.codes
+    label_mapping = dict(enumerate(df['label'].astype('category').cat.categories))
+    logging.info(f"Mapeo de etiquetas a IDs: {label_mapping}")
+
+    # 'X' ahora representa las características indirectamente (a través de la ruta)
+    # Separamos las rutas y las etiquetas para la división
+    X_paths = df['markdown_path'] # Serie de rutas
+    y = df['label_id'] # Serie de IDs de etiqueta
+
+    # Verificar si hay suficientes datos y clases
+    if len(df) < 10: # Umbral arbitrario, ajustar si es necesario
+        logging.error(f"Muy pocos datos ({len(df)}) para entrenar un modelo de forma fiable.")
+        return None, None
+    if len(label_mapping) < 2:
+         logging.error(f"Se necesita al menos 2 clases para la clasificación, encontradas: {len(label_mapping)}")
+         return None, None
+
+
+    logging.info("Dividiendo los datos (rutas y etiquetas)...")
+    try:
+        # Dividimos las rutas y las etiquetas
+        X_train_paths, X_test_paths, y_train_val, y_test = train_test_split(
+            X_paths, y,
+            test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
+        )
+        val_size_relative = VALIDATION_SIZE / (1.0 - TEST_SIZE)
+        X_train_paths, X_val_paths, y_train, y_val = train_test_split(
+            X_train_paths, y_train_val, # Ojo, aquí usamos X_train_paths e y_train_val
+            test_size=val_size_relative, random_state=RANDOM_STATE, stratify=y_train_val
+        )
+
+    except ValueError as e:
+         logging.error(f"Error durante la división de datos (train_test_split): {e}")
+         logging.error("Esto puede ocurrir si una clase tiene muy pocos ejemplos.")
+         logging.info(f"Distribución de clases original:\n{y.value_counts()}")
+         return None, None
+
+    logging.info(f"Tamaño Train: {len(X_train_paths)}, Tamaño Val: {len(X_val_paths)}, Tamaño Test: {len(X_test_paths)}")
+    logging.info(f"Distribución de clases en Train:\n{y_train.value_counts(normalize=True)}")
+    logging.info(f"Distribución de clases en Val:\n{y_val.value_counts(normalize=True)}")
+    logging.info(f"Distribución de clases en Test:\n{y_test.value_counts(normalize=True)}")
+
+    # Guardar el CONJUNTO DE PRUEBA (DataFrame con rutas)
+    try:
+        # Crear DataFrame de prueba seleccionando las filas originales por índice
+        test_indices = X_test_paths.index # Obtener índices de las rutas de prueba
+        test_df = df.loc[test_indices]
+        test_df.to_csv(TEST_SET_PATH, index=False, encoding='utf-8')
+        logging.info(f"Conjunto de prueba (con rutas) guardado en {TEST_SET_PATH}")
+    except Exception as e:
+        logging.warning(f"No se pudo guardar el conjunto de datos de prueba: {e}")
+
+
+    # Calcular pesos de clase si las clases están desbalanceadas (opcional pero recomendado)
+    #class_weights = class_weight.compute_class_weight(
+    #    'balanced',
+    #    classes=np.unique(y_train),
+    #    y=y_train
+    #)
+    # Convertir a diccionario para LinearSVC
+    #class_weights_dict = {i: weight for i, weight in enumerate(class_weights)}
+    #logging.info(f"Pesos de clase calculados (para SVM): {class_weights_dict}")
+
+    # Lista de Stop Words en Español (para documentos legales)
+    stop_words = [
+        "a", "al", "algo", "alguno", "alguna", "algunas", "algunos", "ante", "antes", "aquel", "aquella", "aquellas", "aquellos", "aquí", "así", 
+        "como", "con", "cual", "cuál", "cuando", "de", "debajo", "del", "desde", "donde", "durante", "el", "ella", "ellas", "ellos", "en", "entre", 
+        "es", "esa", "esas", "ese", "eso", "está", "están", "este", "esta", "estas", "esto", "fue", "fueron", "hay", "la", "las", "lo", "los", "más", 
+        "me", "mi", "mío", "míos", "mucho", "muchos", "muy", "nada", "ni", "no", "nos", "nosotros", "nuestro", "nuestros", "o", "otro", "otra", 
+        "otras", "otros", "para", "pero", "poco", "pocos", "por", "porque", "que", "quien", "quienes", "quien", "se", "si", "sí", "su", "sus", 
+        "tal", "también", "tanto", "te", "tu", "tuyo", "tuyos", "un", "una", "unas", "uno", "unos", "y"
+    ]
+
+
+    # Configuración de clasificadores
+    classifiers = {
+        "SVM": True,
+        "Random_Forest": False,
+        "Decision_Tree": False,
+        "KNN": False,
+        "Logistic": False,
+        "XGBoost": False
+    }
+
+    # Seleccionar clasificador
+    classifier = None
+    for name, is_enabled in classifiers.items():
+        if is_enabled:
+            if name == "SVM":
+                logging.info("Creando el pipeline TF-IDF + LinearSVC...")
+                classifier = LinearSVC(
+                    C=SVM_C,
+                    random_state=RANDOM_STATE,
+                    #class_weight=class_weights_dict, # Usar pesos de clase
+                    dual="auto", # Evita warning con n_samples > n_features
+                    max_iter=3000 # Aumentar si no converge
+                )
+            elif name == "Random_Forest":
+                logging.info("Creando el pipeline TF-IDF + RandomForestClassifier...")
+                classifier = RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1)
+            elif name == "Decision_Tree":
+                logging.info("Creando el pipeline TF-IDF + DecisionTreeClassifier...")
+                classifier = DecisionTreeClassifier(random_state=RANDOM_STATE)
+            elif name == "KNN":
+                logging.info("Creando el pipeline TF-IDF + KNN_classifier...")
+                classifier = KNeighborsClassifier(n_neighbors=30)
+            elif name == "Logistic":
+                logging.info("Creando el pipeline TF-IDF + Logistic_classifier...")
+                classifier = LogisticRegression(max_iter=1000)    
+            elif name == "XGBoost":
+                logging.info("Creando el pipeline TF-IDF + XGBoost...")
+                classifier = XGBClassifier(use_label_encoder=False, eval_metric='logloss', tree_method='gpu_hist')    
+            break  # Salir del bucle una vez que se encuentra un clasificador
+
+    if classifier is None:
+        raise ValueError("Ningún clasificador seleccionado.")
+
+
+    # >>> CARGAR TEXTOS ANTES DE ENTRENAR <<<
+    texts_train = load_texts(X_train_paths, include_procedure=False)
+    if not texts_train: # Si la carga falló o devolvió vacío
+        logging.error("No se pudo cargar ningún texto para entrenamiento. Abortando.")
+        return None, None
+
+    # Seleccionar Vectorizador
+    tfidf= True
+    sentence_transform = False
+    word2vec = False
+    word2vec_tfidf = False
+    if tfidf:
+        # Crear el vectorizador TF-IDF
+        vectorizer = TfidfVectorizer(
+            stop_words=stop_words, # Considera añadir stopwords en español ['de', 'la', 'el', ...]
+            tokenizer=None,  # Usa el tokenizador predeterminado
+            analyzer='word',  # Analiza por palabras
+            norm='l2',  # Normalización L2
+            max_df=TFIDF_MAX_DF,
+            min_df=TFIDF_MIN_DF,
+            ngram_range=TFIDF_NGRAM_RANGE,
+            sublinear_tf=True,
+            #token_pattern = r'(?u)\b\w\w+\b' # predeterminado
+            #token_pattern=r"(?u)\b(?!\d+\b)\w+\b"  # <- solo palabras que no son números
+            token_pattern=r'(?u)\b[^\d\W]{2,}\b'
+        )
+
+        X = vectorizer.fit_transform(texts_train)
+
+        # Número de dimensiones
+        num_dimensiones = X.shape[1]  # Esto te da el número de términos únicos
+        print(f"Número de dimensiones (términos únicos): {num_dimensiones}")
+
+        # Obtener los términos únicos
+        terms = vectorizer.get_feature_names_out()
+        print(f"Número de términos únicos: {len(terms)}")
+        
+        # Ejemplo de uso
+        #filtered_terms = [term for term in terms if re.match(r'^\d+(\s\d+)*$', term)]
+        #print(f"Términos después de filtrar números: {len(filtered_terms)}")
+        
+        # Obtener índices de términos a conservar
+        #indices_to_keep = [i for i, term in enumerate(terms) if term in filtered_terms]
+
+        # Crear una nueva matriz TF-IDF solo con los términos deseados
+        #X_filtered = X[:, indices_to_keep]
+
+        # Número de dimensiones (términos únicos) después de aplicar TF-IDF y filtrar
+        #num_dimensiones_filtered = X_filtered.shape[1]
+        #print(f"Número de dimensiones (términos únicos) después de filtrar: {num_dimensiones_filtered}")
+    
+    # Crear el sentence_transformer    
+    # Ejemplo de configuración
+    elif sentence_transform: 
+        vectorizer = SentenceTransformerVectorizer(
+            model_name='distiluse-base-multilingual-cased-v1',   # 'distiluse-base-multilingual-cased-v1'   'all-MiniLM-L6-v2'
+            pooling_strategy=None,  # 'mean' o 'max', dependiendo de tus pruebas. En este caso se opta por None, ya que si no quita riqueza a las oraciones
+            device='cuda' if torch.cuda.is_available() else 'cpu',  # usar GPU si está disponible
+            batch_size=64  # ajustar según tu memoria disponible
+        )
+    elif word2vec:        
+        # Vectorizador con modelo de vectores en español
+        vectorizer = Word2VecAverager(model_path=SBW_VECTORS_PATH, binary=True)
+    elif word2vec_tfidf:   
+        vectorizer =TfidfWeightedWord2VecTransformer(model_path=SBW_VECTORS_PATH, binary=True)
+ 
+    # classifier = SVC(C=10, kernel='linear' ,random_state=RANDOM_STATE, max_iter=3000)
+    # Crear el pipeline
+    pipeline = Pipeline([
+        ('tfidf', vectorizer),
+        ('clf', classifier) # Clasificador
+    ])
+
+
+    # Búsqueda de hiperparámetros óptimos para TFIDF Y SVM
+    grid_active=True
+    if grid_active:
+        # Seleccionar clasificador
+        for name, is_enabled in classifiers.items():
+            if is_enabled:
+                if name == "SVM":
+                    if tfidf:
+                        pipeline = Pipeline([
+                            ('tfidf', TfidfVectorizer(tokenizer=None, norm='l2')),
+                            ('kbest', SelectKBest(chi2)),  # Selección de las 100 mejores características
+                            ('clf', LinearSVC(random_state=RANDOM_STATE, max_iter=3000))
+                        ])
+
+                        params = {
+                            'tfidf__stop_words': [None],
+                            'tfidf__sublinear_tf': [True],
+                            'tfidf__ngram_range': [(1,2)],
+                            'tfidf__max_df': [0.95],
+                            'tfidf__min_df': [10], 
+                            'tfidf__token_pattern': [r'(?u)\b[^\d\W]{2,}\b'],
+                            'kbest__k': [20000, 25000],   # 750 casos 30000
+                            'clf__C': [2.5],
+                            #'clf__kernel': ['linear']  # 'linear': para un clasificador lineal. 
+                            # 'poly': para un núcleo polinómico. 'rbf': para un núcleo radial (Gaussiano), que es el más utilizado. 'sigmoid': para un núcleo sigmoide.
+                        }
+
+                    elif word2vec:
+                        pipeline = Pipeline([
+                            ('w2v', Word2VecAverager(model_path=SBW_VECTORS_PATH, binary=True)),
+                            ('clf', LinearSVC(random_state=RANDOM_STATE, max_iter=3000))
+                        ])
+
+                        params = {
+                            'clf__C': [12, 15, 20],
+                            #'clf__kernel': ['linear']  # 'linear': para un clasificador lineal. 
+                            # 'poly': para un núcleo polinómico. 'rbf': para un núcleo radial (Gaussiano), que es el más utilizado. 'sigmoid': para un núcleo sigmoide.
+                        }
+
+                    grid = GridSearchCV(pipeline, param_grid=params, cv=5, scoring='f1_macro', n_jobs=-1)
+
+
+                elif name == "KNN":
+
+                    # Crear el pipeline
+                    pipeline = Pipeline([
+                        ('tfidf', TfidfVectorizer(tokenizer=None, norm='l2')),
+                        ('kbest', SelectKBest(chi2, k=20000)),  # Selección de las 100 mejores características
+                        ('clf', KNeighborsClassifier())
+                    ])
+
+                    # Definir los parámetros para la búsqueda en cuadrícula
+                    param_grid = {
+                        'tfidf__stop_words': [None],
+                        'tfidf__sublinear_tf': [True],
+                        'tfidf__ngram_range': [(1,2)],
+                        'tfidf__max_df': [0.95],
+                        'tfidf__min_df': [10], 
+                        'tfidf__token_pattern': [r'(?u)\b[^\d\W]{2,}\b'],
+                        'clf__n_neighbors': [30],
+                        'clf__metric': ['cosine']  # 'euclidean', 'manhattan', 'chebyshev', 
+                    }
+
+                    # Crear el GridSearchCV
+                    grid = GridSearchCV(pipeline, param_grid, cv=5, scoring='accuracy', verbose=1)
+        
+        grid.fit(texts_train, y_train)
+
+        pipeline=grid.best_estimator_
+
+        # Imprimir los mejores parámetros
+        best_params = grid.best_params_
+        best_score = grid.best_score_
+
+        logging.info(f"Mejores parámetros encontrados: {best_params}")
+        logging.info(f"Mejor puntuación (f1_macro): {best_score:.4f}")
+
+        # También puedes imprimirlos en la consola si lo deseas
+        print("Mejores parámetros encontrados:", best_params)
+        print("Mejor puntuación (f1_macro): {:.4f}".format(best_score))
+    
+
+    # Entrenar el modelo CON LOS TEXTOS CARGADOS
+    logging.info("Entrenando el modelo...")
+    try:
+        # Usamos texts_train aquí, no X_train_paths
+        if not grid_active:
+            pipeline.fit(texts_train, y_train)
+        logging.info("Entrenamiento completado.")
+    except Exception as e:
+        logging.error(f"Error durante el entrenamiento del pipeline: {e}")
+        return None, None
+
+    # >>> CARGAR TEXTOS PARA VALIDACIÓN <<<
+    logging.info("\n--- Evaluación en Conjunto de Validación ---")
+    texts_val = load_texts(X_val_paths, include_procedure=True)
+    if not texts_val:
+        logging.warning("No se pudo cargar ningún texto para validación. Saltando evaluación de validación.")
+    else:
+        try:
+            # Usamos texts_val aquí
+            y_pred_val = pipeline.predict(texts_val)
+            target_names = [label_mapping[i] for i in sorted(label_mapping.keys())]
+            report = classification_report(y_val, y_pred_val, target_names=target_names)
+            accuracy = accuracy_score(y_val, y_pred_val)
+            print(report)
+            logging.info(f"Accuracy Validación: {accuracy:.4f}")
+        except Exception as e:
+            logging.error(f"Error durante la evaluación en el conjunto de validación: {e}")
+
+    # Guardar el pipeline entrenado y el mapeo de etiquetas
+    logging.info("Guardando el modelo y el mapeo de etiquetas...")
+    try:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(pipeline, MODEL_PATH)
+        joblib.dump(label_mapping, MAPPING_PATH)
+        logging.info(f"Modelo guardado en: {MODEL_PATH}")
+        logging.info(f"Mapeo de etiquetas guardado en: {MAPPING_PATH}")
+    except Exception as e:
+        logging.error(f"Error guardando el modelo o el mapeo: {e}")
+        return None, None # Considerar si devolver el pipeline aunque no se guarde
+
+    return pipeline, label_mapping
+
+# --- Script Principal ---
+def main():
+    logging.info("--- Iniciando Script de Entrenamiento ---")
+    # load_data ahora carga el df con rutas
+    df = load_data(LABELED_DATA_PATH)
+
+    if df is not None and not df.empty:
+        # train_model ahora trabaja con rutas y carga texto internamente
+        pipeline, label_mapping = train_model(df)
+        if pipeline and label_mapping:
+            logging.info("--- Script de Entrenamiento Finalizado Exitosamente ---")
+        else:
+            logging.error("--- Script de Entrenamiento Finalizado con Errores ---")
+    else:
+        logging.error("No se pudieron cargar los datos. Finalizando script.")
+        logging.error("--- Script de Entrenamiento Finalizado con Errores ---")
+
+if __name__ == "__main__":
+    main()
+
+
+evaluation.py
+
+
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import joblib
+import logging
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, accuracy_score
+from training import load_texts # Asumiendo que la definiste en training.py
+import matplotlib.pyplot as plt
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constantes y Configuración ----
+MODEL_DIR = Path('models/tfidf_svm')
+MODEL_PATH = MODEL_DIR / 'tfidf_svm_pipeline.joblib'
+MAPPING_PATH = MODEL_DIR / 'label_mapping.joblib'
+TEST_SET_PATH = Path('data/labeled/test_set.csv') # Usamos el archivo guardado por training.py
+RESULTS_DIR = Path('results')
+CONFUSION_MATRIX_PATH = RESULTS_DIR / 'confusion_matrix_test.png'
+CLASSIFICATION_REPORT_PATH = RESULTS_DIR / 'classification_report_test.csv'
+CONFIDENCE_THRESHOLD = 0.0  # Aumentar para mayor seguridad, entre 0 y ∞ (0.4–1.0 típico)
+
+
+valid_labels_by_procedure = {
+    "MONITORIO": {"emplazamiento parte actora para impugnar","tasa modelo 696","admisión a trámite total","tasa catalana","requerimiento tic","requerimiento pago negativo",
+                "notificacion judicial no específica", "archivo ignorado paradero", "demanda monitorio pdf", "requerimiento otros","traslado escrito de contrario",
+                "averiguación patrimonial", "acuerda personación", "requerimiento copias", "archivo incompetencia territorial", "inadmision insuficiente acreditacion deuda",
+                "requerimiento pago positivo","acuerda embargo telemático", "decanato ejecutivo", "requerimiento aportar cuenta", "decanato monitorio", "acuerda entrega cantidades",
+                "copia sellada", "acuerda requerimiento nuevo domicilio", "requerimiento desglose deuda", "requerimiento cláusulas abusivas", "requerimiento modificar cuantía",
+                "habilitación horas", "acuerda requerimiento", "pendiente de resolver", "admisión a trámite parcial", "auto fin monitorio para ejecutar", "acuerda consulta registro concursal",
+                "oficio pagador negativo", "declaracion no cláusulas abusivas","auto despachando ejecución", "acuerda embargo salario"
+            },
+    
+    "EJECUCION TITULO JUDICIAL": {"emplazamiento parte actora para impugnar", "admisión a trámite total", "requerimiento tic", "requerimiento pago negativo", "notificacion judicial no específica",
+                "archivo ignorado paradero", "requerimiento otros", ...
+            },
+...
+}
+
+
+# --- Funciones ---
+
+def load_model_and_mapping(model_path, mapping_path):
+    """Carga el pipeline y el mapeo de etiquetas."""
+    if not model_path.exists() or not mapping_path.exists():
+        logging.error("No se encontró el modelo entrenado o el archivo de mapeo.")
+        logging.error(f"Buscado en: {model_path.parent}")
+        logging.error("Asegúrate de haber ejecutado 'python src/training.py' primero.")
+        return None, None
+    try:
+        pipeline = joblib.load(model_path)
+        label_mapping = joblib.load(mapping_path)
+        logging.info(f"Modelo cargado desde: {model_path}")
+        logging.info(f"Mapeo de etiquetas cargado: {label_mapping}")
+        return pipeline, label_mapping
+    except Exception as e:
+        logging.error(f"Error cargando el modelo o el mapeo: {e}")
+        return None, None
+
+def load_test_data(file_path):
+    """Carga los datos de prueba (con rutas a markdown)."""
+    # ... (comprobación de existencia sin cambios) ...
+    try:
+        df = pd.read_csv(file_path)
+        # Asegurarse que las columnas necesarias existen y no tienen NaNs
+        # Usamos 'label_id' si fue guardado por training.py, sino 'label'
+        label_col = 'label_id' if 'label_id' in df.columns else 'label'
+        required_cols = ['markdown_path', label_col]
+        df.dropna(subset=required_cols, inplace=True)
+        df['markdown_path'] = df['markdown_path'].astype(str)
+
+        logging.info(f"Datos de prueba cargados desde {file_path}. Filas: {len(df)}")
+        if df.empty:
+             logging.error("El archivo CSV de prueba está vacío.")
+             return None
+        # Verificar columnas
+        if 'markdown_path' not in df.columns:
+            logging.error(f"Columna 'markdown_path' no encontrada en {file_path}")
+            return None
+        if label_col not in df.columns:
+             logging.error(f"Columna de etiqueta ('{label_col}') no encontrada en {file_path}")
+             return None
+        return df
+    except Exception as e:
+        logging.error(f"Error cargando el archivo CSV de prueba {file_path}: {e}")
+        return None
+
+def get_procedure_from_path(path):
+    return Path(path).stem.split('_')[0].upper()
+
+def top_k_accuracy(y_true, scores, k=3):
+    """Calcula la precisión top-k: etiqueta correcta entre las k predicciones más probables."""
+    top_k_preds = np.argsort(scores, axis=1)[:, -k:]  # Últimos k índices (mayores scores)
+    hits = [y in top_k for y, top_k in zip(y_true, top_k_preds)]
+    return np.mean(hits)
+
+
+def evaluate_model(pipeline, df_test, label_mapping):
+    """Evalúa el modelo en el conjunto de prueba y guarda los resultados."""
+    logging.info("Iniciando evaluación en el conjunto de prueba...")
+
+    # Obtener rutas y etiquetas verdaderas
+    test_paths = df_test['markdown_path']
+    # Usar label_id si existe, sino mapear label string a id (requiere label_mapping)
+    if 'label_id' in df_test.columns:
+        y_test_true = df_test['label_id']
+    else:
+        # Mapear labels string a IDs si solo tenemos 'label'
+        # Crear mapeo inverso: {'label_str': id}
+        reverse_mapping = {v: k for k, v in label_mapping.items()}
+        y_test_true = df_test['label'].map(reverse_mapping)
+        if y_test_true.isnull().any():
+             logging.error("Algunas etiquetas en el test set no estaban en el mapeo original.")
+             # Podrías filtrar estas filas o detener
+             rows_with_unknown_labels = df_test[y_test_true.isnull()]
+             logging.error(f"Filas con etiquetas desconocidas:\n{rows_with_unknown_labels}")
+             return # Detener evaluación
+
+    if test_paths.empty:
+        logging.error("No hay rutas de archivo en el conjunto de prueba para evaluar.")
+        return
+
+    # >>> CARGAR TEXTOS ANTES DE PREDECIR <<<
+    texts_test = load_texts(test_paths, include_procedure=False)
+    if not texts_test:
+        logging.error("No se pudo cargar ningún texto para evaluación. Abortando.")
+        return
+
+    try:
+        # Predecir USANDO LOS TEXTOS CARGADOS
+        y_test_pred = pipeline.predict(texts_test)
+        threshold=True
+        # Obtener distancias al hiperplano para cada clase
+        if threshold:
+            decision_scores = pipeline.decision_function(texts_test)  # shape: (n_samples, n_classes)
+
+            # Evaluación Top-k
+            top1_acc = top_k_accuracy(y_test_true, decision_scores, k=1)
+            top2_acc = top_k_accuracy(y_test_true, decision_scores, k=2)
+            top3_acc = top_k_accuracy(y_test_true, decision_scores, k=3)
+
+            logging.info(f"Precisión Top-1: {top1_acc:.4f}")
+            logging.info(f"Precisión Top-2: {top2_acc:.4f}")
+            logging.info(f"Precisión Top-3: {top3_acc:.4f}")
+
+            # Para cada ejemplo, extraer el score máximo (corresponde a la clase predicha)
+            max_scores = np.max(decision_scores, axis=1)
+            predicted_labels = np.argmax(decision_scores, axis=1)
+
+            # Aplicar umbral: si el score máximo < threshold → etiquetar como "desconocido"
+            unknown_label = -1  # Valor reservado para "no clasificado"
+            y_test_pred = np.where(max_scores >= CONFIDENCE_THRESHOLD, predicted_labels, unknown_label)
+
+            # Se eliminaran aquellas etiquetas que no existan entre las potenciales de dicho procedimiento
+            filtro_procedimiento=True
+            if filtro_procedimiento:
+                for i, pred in enumerate(y_test_pred):
+                    # Si ya es etiqueta desconocida pasar al siguiente
+                    if pred == -1:
+                        continue
+                    proc = get_procedure_from_path(test_paths.iloc[i])
+                    valid_labels = valid_labels_by_procedure.get(proc, set())
+
+                    pred_label = label_mapping.get(pred, None) 
+                    if pred_label in ["declaracion no cláusulas abusivas", "notificacion judicial no específica", "requerimiento pago negativo", "acuerda embargo telemático"]:
+                        y_test_pred[i] = np.int64(-1)
+                    elif pred_label in valid_labels:
+                        continue
+                    else:
+                        y_test_pred[i] = np.int64(-1)
+            
+            # Dividir ejemplos clasificados y no clasificados
+            classified_mask = y_test_pred != unknown_label
+            unclassified_mask = ~classified_mask
+
+            # Calcular métricas solo sobre clasificados
+            y_true_classified = y_test_true[classified_mask]
+            y_pred_classified = y_test_pred[classified_mask]
+
+            # Para no clasificados, creamos etiquetas dummy "desconocido"
+            y_true_unclassified = y_test_true[unclassified_mask]
+            y_pred_unclassified = np.full_like(y_true_unclassified, fill_value=unknown_label)
+
+    except Exception as e:
+        logging.error(f"Error durante la predicción en el conjunto de prueba: {e}")
+        return
+
+    # Obtener nombres de etiquetas (sin cambios)
+    target_names = [label_mapping[i] for i in sorted(label_mapping.keys())]
+
+    # Matriz de confusión para ejemplos clasificados
+    if threshold:
+        if len(y_true_classified) > 0:
+            cm_classified = confusion_matrix(y_true_classified, y_pred_classified, labels=pipeline.classes_)
+            disp = ConfusionMatrixDisplay(confusion_matrix=cm_classified, display_labels=target_names)
+
+            fig, ax = plt.subplots(figsize=(20, 18))
+            disp.plot(ax=ax, cmap=plt.cm.Blues, xticks_rotation=90)
+            plt.title('Matriz de Confusión - Solo Clasificados (Confianza ≥ Threshold)')
+            plt.tight_layout()
+            plt.savefig(RESULTS_DIR / 'confusion_matrix_classified.png')
+            plt.close()
+
+        if len(y_true_unclassified) > 0:
+            true_classes = list(pipeline.classes_)  # normalmente enteros 0,1,...,N-1
+            display_labels = [label_mapping[i] for i in true_classes]  # nombres originales
+            # Añade "desconocido" tanto en valor como en etiqueta
+            labels_with_unknown = true_classes + [unknown_label]
+            display_labels_with_unknown = display_labels + ['desconocido']
+
+            # Solo 1 clase predicha: "desconocido"
+            fig, ax = plt.subplots(figsize=(20, 18))
+            cm_unclassified = confusion_matrix(y_true_unclassified, y_pred_unclassified, labels=labels_with_unknown)
+            display_labels = target_names + ['desconocido']
+            disp = ConfusionMatrixDisplay(confusion_matrix=cm_unclassified, display_labels=display_labels_with_unknown)
+
+            disp.plot(ax=ax, cmap=plt.cm.Oranges, xticks_rotation=90)
+            plt.title('Matriz - Documentos deriv. a Manual (Confianza < Threshold)')
+            plt.tight_layout()
+            plt.savefig(RESULTS_DIR / 'confusion_matrix_unclassified.png')
+            plt.close()
+
+        total = len(y_test_true)
+        n_classified = len(y_true_classified)
+        n_unclassified = len(y_true_unclassified)
+        prop_classified = n_classified / total
+        prop_unclassified = n_unclassified / total
+
+        logging.info(f"Total documentos evaluados: {total}")
+        logging.info(f"Documentos clasificados automáticamente: {n_classified} ({prop_classified:.2%})")
+        logging.info(f"Documentos derivados a revisión manual: {n_unclassified} ({prop_unclassified:.2%})")
+
+        # --- Generar y Guardar Reporte de Clasificación ---
+        logging.info("\n--- Reporte de Clasificación (Conjunto de filtrado) ---")
+
+        # Excluir etiquetas "desconocido" (-1) del reporte
+        valid_indices = y_test_pred != -1
+        y_true_filtered = y_test_true[valid_indices]
+        y_pred_filtered = y_test_pred[valid_indices]
+
+        # Obtener las etiquetas realmente presentes en la predicción
+        present_classes = sorted(set(y_pred_filtered))
+
+        # Nombres de etiquetas presentes
+        present_target_names = [label_mapping[i] for i in present_classes]
+
+        # Reporte restringido
+        report_str = classification_report(y_true_filtered, y_pred_filtered, labels=present_classes, target_names=present_target_names)
+        report_dict = classification_report(y_true_filtered, y_pred_filtered, labels=present_classes, target_names=present_target_names, output_dict=True)
+        accuracy = accuracy_score(y_true_filtered, y_pred_filtered)
+
+        print(report_str)
+        logging.info(f"Accuracy General (Prueba): {accuracy:.4f}")
+
+    # --- Generar y Guardar Reporte de Clasificación ---
+    logging.info("\n--- Reporte de Clasificación (Conjunto de Prueba) ---")
+    try:
+        report_str = classification_report(y_test_true, y_test_pred, target_names=target_names)
+        report_dict = classification_report(y_test_true, y_test_pred, target_names=target_names, output_dict=True)
+        accuracy = accuracy_score(y_test_true, y_test_pred)
+
+        print(report_str)
+        logging.info(f"Accuracy General (Prueba): {accuracy:.4f}")
+
+        # Guardar reporte en CSV
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        report_df = pd.DataFrame(report_dict).transpose()
+        report_df.to_csv(CLASSIFICATION_REPORT_PATH, encoding='utf-8')
+        logging.info(f"Reporte de clasificación guardado en: {CLASSIFICATION_REPORT_PATH}")
+
+    except Exception as e:
+        logging.error(f"Error generando o guardando el reporte de clasificación: {e}")
+
+    # --- Generar y Guardar Matriz de Confusión ---
+    logging.info("\nGenerando Matriz de Confusión...")
+    try:
+        cm = confusion_matrix(y_test_true, y_test_pred, labels=pipeline.classes_) # Usar las clases del pipeline
+
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=target_names)
+
+        fig, ax = plt.subplots(figsize=(20, 18))
+        disp.plot(ax=ax, cmap=plt.cm.Blues, xticks_rotation=90)  # rotación vertical completa
+        plt.title('Matriz de Confusión - Conjunto de Prueba')
+        plt.tight_layout()
+
+        # Guardar como PNG
+        plt.savefig(CONFUSION_MATRIX_PATH, dpi=300)  # Mejor resolución
+
+        # Guardar también como PDF si querés zoom sin pérdida
+        CONFUSION_MATRIX_PDF_PATH = CONFUSION_MATRIX_PATH.with_suffix(".pdf")
+        plt.savefig(CONFUSION_MATRIX_PDF_PATH, bbox_inches='tight')
+
+        logging.info(f"Matriz de confusión guardada en: {CONFUSION_MATRIX_PATH} y {CONFUSION_MATRIX_PDF_PATH}")
+        # plt.show() # Descomentar si quieres mostrarla interactivamente
+
+    except Exception as e:
+        logging.error(f"Error generando o guardando la matriz de confusión: {e}")
+
+# --- Script Principal ---
+def main():
+    logging.info("--- Iniciando Script de Evaluación ---")
+
+    pipeline, label_mapping = load_model_and_mapping(MODEL_PATH, MAPPING_PATH)
+    df_test = load_test_data(TEST_SET_PATH)
+
+    if pipeline and label_mapping and df_test is not None and not df_test.empty:
+        evaluate_model(pipeline, df_test, label_mapping)
+        logging.info("--- Script de Evaluación Finalizado Exitosamente ---")
+    else:
+        logging.error("No se pudo completar la evaluación debido a errores previos (modelo/datos faltantes).")
+        logging.error("--- Script de Evaluación Finalizado con Errores ---")
+
+if __name__ == "__main__":
+    main()
