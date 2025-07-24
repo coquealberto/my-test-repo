@@ -178,3 +178,131 @@ trainer.train()
 preds = trainer.predict(test_dataset)
 y_pred = preds.predictions.argmax(axis=-1)
 print(classification_report(y_test, y_pred, target_names=le.classes_))
+
+
+
+¡Claro que sí! Implementar un análisis de errores dirigido es un paso fundamental para entender el comportamiento de tu modelo.
+Para analizar si el modelo falla más en los documentos largos, debes realizar la evaluación sobre el conjunto de prueba, pero dividiéndolo en dos grupos:
+ * Documentos "normales": El 90% de los documentos, cuya longitud es menor o igual al umbral que definiste.
+ * Documentos "largos": El 10% de los documentos más extensos, que superan ese umbral.
+Aquí te muestro el código que puedes añadir justo después de la línea print(classification_report(...)) al final de tu script.
+Código para el Análisis de Errores
+Este bloque de código se encarga de realizar todo el análisis por ti.
+print("\n" + "="*50)
+print("INICIO DEL ANÁLISIS DE ERRORES POR LONGITUD")
+print("="*50 + "\n")
+
+# --- 1. Crear un DataFrame con todos los resultados del test set ---
+# Es crucial usar los textos originales (X_test_texts) para medir la longitud ANTES de cualquier truncamiento.
+df_results = pd.DataFrame({
+    'text': X_test_texts,
+    'true_label_id': y_test,
+    'predicted_label_id': y_pred
+})
+
+# Mapear los IDs de las etiquetas a sus nombres para mayor claridad
+df_results['true_label_name'] = df_results['true_label_id'].apply(lambda x: label_mapping[x])
+df_results['predicted_label_name'] = df_results['predicted_label_id'].apply(lambda x: label_mapping[x])
+
+# --- 2. Calcular la longitud en tokens de cada documento original ---
+print("Calculando la longitud original en tokens de los documentos de prueba...")
+df_results['token_length'] = [len(tokenizer.tokenize(t)) for t in df_results['text']]
+print(f"Longitud media de tokens en el test set: {df_results['token_length'].mean():.2f}")
+
+# --- 3. Definir el umbral y dividir el DataFrame ---
+# Usamos el cuantil 0.9 para encontrar el umbral que separa el 10% más largo.
+length_threshold = df_results['token_length'].quantile(0.90)
+print(f"Umbral de longitud (cuantil 90): {length_threshold:.0f} tokens. Los documentos más largos que esto serán analizados por separado.")
+
+# Dividir en dos grupos
+df_long_docs = df_results[df_results['token_length'] > length_threshold]
+df_normal_docs = df_results[df_results['token_length'] <= length_threshold]
+
+print(f"\nTotal de documentos en Test: {len(df_results)}")
+print(f"Documentos 'Normales' (<= {length_threshold:.0f} tokens): {len(df_normal_docs)}")
+print(f"Documentos 'Largos' (> {length_threshold:.0f} tokens): {len(df_long_docs)}")
+
+# --- 4. Generar y mostrar los reportes de clasificación para cada grupo ---
+
+print("\n" + "-"*50)
+print("## Métricas en DOCUMENTOS NORMALES (90% inferior) ##")
+print("-"*50)
+if not df_normal_docs.empty:
+    report_normal = classification_report(
+        df_normal_docs['true_label_id'],
+        df_normal_docs['predicted_label_id'],
+        target_names=le.classes_
+    )
+    print(report_normal)
+else:
+    print("No hay documentos en la categoría 'normal' para analizar.")
+
+print("\n" + "-"*50)
+print("## 🚨 Métricas en DOCUMENTOS LARGOS (10% superior) 🚨 ##")
+print("-"*50)
+if not df_long_docs.empty:
+    report_long = classification_report(
+        df_long_docs['true_label_id'],
+        df_long_docs['predicted_label_id'],
+        target_names=le.classes_
+    )
+    print(report_long)
+else:
+    print("No hay documentos en la categoría 'largo' para analizar.")
+
+print("\n" + "="*50)
+print("FIN DEL ANÁLISIS")
+print("="*50)
+
+# Opcional: Guardar los fallos en los documentos largos para una revisión manual
+errors_long_docs = df_long_docs[df_long_docs['true_label_id'] != df_long_docs['predicted_label_id']]
+if not errors_long_docs.empty:
+    errors_long_docs.to_csv("errores_en_documentos_largos.csv", index=False)
+    print(f"\nSe han guardado {len(errors_long_docs)} errores de clasificación en documentos largos en 'errores_en_documentos_largos.csv' para revisión manual.")
+
+
+¿Cómo funciona y cómo interpretar los resultados? 🧐
+ * Medición Correcta: El paso clave es medir la longitud en tokens del texto original, antes de que la función tokenize_batch lo trunque a MAX_LENGTH. Esto nos da la verdadera complejidad del documento.
+ * División por Percentil: Usamos .quantile(0.90) para encontrar el valor de longitud que deja al 10% de los documentos más largos por encima y al 90% por debajo. Esto es más robusto que usar un número fijo.
+ * Comparación Directa: El script imprime dos informes de clasificación uno al lado del otro.
+Para interpretar los resultados, fíjate en:
+ * Caída en F1-Score (weighted avg): Compara el f1-score promedio ponderado entre el informe de "Documentos Normales" y el de "Documentos Largos". Si ves una caída significativa (ej. de 0.95 a 0.80), es una clara señal de que el modelo sufre con los textos largos.
+ * Precisión y Recall por Clase: Observa si alguna clase específica empieza a tener un recall muy bajo en los documentos largos. Quizás el modelo confunde dos tipos de documentos largos porque la información distintiva fue truncada.
+ * Accuracy: Una caída general en la accuracy también es un indicador claro.
+Si confirmas que el rendimiento es desproporcionadamente bajo en los documentos largos, tienes una justificación sólida para probar el modelo de 8192 tokens (clibrain/legal-longformer-base-8192-spanish), ya que la causa del error sería la pérdida de información por truncamiento.
+Nota Adicional sobre tu Código de Truncamiento
+He notado una pequeña anomalía en tu función smart_truncate:
+# En tu código original
+def smart_truncate(text, tokenizer, max_len=MAX_LENGTH, return_ids=False):
+    # ... (código para obtener head y tail) ...
+    truncated_ids = head + tail
+    truncated_ids = input_ids # <--- ¡Cuidado aquí!
+    # ...
+
+La línea truncated_ids = input_ids está sobrescribiendo y anulando el truncamiento que calculaste en la línea anterior. Esto significa que tu truncamiento "inteligente" no se está aplicando, y el truncamiento real lo hace tokenizer en el map (que por defecto corta por la derecha).
+Para que funcione como esperas (mitad del principio y mitad del final), deberías eliminar esa línea:
+# Versión corregida
+def smart_truncate(text, tokenizer, max_len=MAX_LENGTH, return_ids=False):
+    encoding = tokenizer.encode_plus(
+        text,
+        add_special_tokens=False,
+    )
+    input_ids = encoding["input_ids"]
+    
+    # Si no supera la longitud, no hagas nada
+    if len(input_ids) <= max_len:
+         return tokenizer.decode(input_ids, skip_special_tokens=True)
+
+    head_len = max_len // 2
+    tail_len = max_len - head_len
+
+    head = input_ids[:head_len]
+    tail = input_ids[-tail_len:]
+    
+    truncated_ids = head + tail # Ahora sí se usan los IDs truncados
+    
+    if return_ids:
+        return truncated_ids
+    else:
+        return tokenizer.decode(truncated_ids, skip_special_tokens=True)
+
