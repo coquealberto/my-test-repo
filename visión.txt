@@ -231,3 +231,41 @@ Consideraciones Clave:
  * Ajusta los Hiperparámetros: Si te quedas sin memoria (CUDA out of memory), reduce el per_device_train_batch_size en TrainingArguments (por ejemplo, a 4 o 2).
  * Este es un Punto de Partida: Este script demuestra la viabilidad. Para un sistema en producción, podrías explorar modelos más avanzados (como DiT o LayoutLM si quieres combinar visión y texto) o técnicas como procesar más de una página.
 Este enfoque te dará una excelente primera idea del poder que tiene el análisis visual para tu problema de clasificación, complementando perfectamente tu trabajo previo con el texto.
+
+
+
+
+necesito incluir lo siguiente en prepare vision data, en primer lugar descartar las paginas iniciales que tengan un marcador de Lexnet. además detectar en primer lugar si es una pagina con texto anómalo, y si lo es, pasar a escanearla, en este caso me gustaria usar alguna librería de escaneado gratuita (tesseract quizá) en lugar de document intelligence. tras ello, detectar si tiene el marcador Lexnet # Literal a buscar para eliminar página (ajusta si es necesario, ej. case-insensitive)
+LEXNET_MARKER = "Mensaje LexNET -", si lo tiene, pasar a la siguiente pagina y repetir el procedimiento (detectar si es pagina anómala y pasar filtro Lexnet, asi hasta pasar una pagina sin Lexnet, que sera la elegida. también se descartaran aquellas paginas que tengan menos de 1000 caracteres tras el escaneo o sin el escaneo en caso de que no haga falta. también quiero descartar aquellas paginas que tengan el siguiente texto:
+"Todas las horas referidas por LexNET son de ámbito Peninsular" o este otro: "Protección de Datos:
+El ‘Órgano Jurisdiccional u Oficina Judicial’". también quiero descartar aquellos que tengan 5  strings que declarare y que cumplan la presencia de todos ellos. "INFORMACIÓN DEL EMAIL"
+"De"
+"Destinatarios"
+"Asunto"
+"Adjuntos"
+"Fecha de envío"
+
+
+
+def is_anomalous_text(text):
+    """Detecta si el texto extraído es anómalo."""
+    # Tu lógica aquí es un buen punto de partida.
+    if not text or not text.strip():
+        return True
+    
+    # Si la página es muy corta, no es anómala si contiene el aviso legal típico.
+    if len(text.strip()) < 300 and "Este documento es una copia auténtica del documento" not in text:
+        return True
+    
+    # Comprobar proporción de caracteres no alfanuméricos
+    # (puede dar falsos positivos en texto con muchos símbolos, como '€', '/', etc.)
+    try:
+        non_alpha_chars = sum(1 for c in text if not c.isalnum() and not c.isspace())
+        total_chars = len(text)
+        if total_chars > 0 and (non_alpha_chars / total_chars > 0.15): # Ajustado a 15% para ser más permisivo
+            logging.info("Texto marcado como anómalo por alta proporción de caracteres no alfanuméricos.")
+            return True
+    except ZeroDivisionError:
+        return True
+        
+    return False
