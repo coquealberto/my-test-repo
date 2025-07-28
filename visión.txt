@@ -1,0 +1,233 @@
+Sí, es una idea excelente y muy útil. Explorar el reconocimiento del layout y los patrones visuales es el siguiente paso lógico y a menudo el más potente para la clasificación de documentos legales, ya que su estructura visual suele ser muy distintiva.
+El texto por sí solo puede ser ambiguo (un decreto y una demanda pueden mencionar las mismas leyes), pero la maquetación (sellos, cabeceras, firmas, disposición del texto) suele ser única para cada tipo de documento. Un modelo de visión puede aprender estas diferencias.
+Ahora bien, entrenar un modelo de visión localmente es más exigente que el modelo de texto. No es viable entrenarlo desde cero, pero sí podemos hacer fine-tuning de un modelo pre-entrenado, que es un enfoque muy efectivo.
+El Enfoque: Fine-Tuning de un Modelo de Visión
+La estrategia más práctica para una POC local es la siguiente:
+ * Convertir la primera página de cada PDF a una imagen. La primera página suele contener los elementos más diferenciadores (título, sellos, partes involucradas).
+ * Usar estas imágenes para hacer fine-tuning de un modelo de visión pre-entrenado (como un Vision Transformer - ViT). El modelo aprenderá a asociar la "apariencia" de la primera página con la etiqueta del documento.
+Paso 1: Preparar los Datos (Imágenes)
+Primero, necesitamos un script que convierta nuestros PDFs en un dataset de imágenes. Para ello usaremos la biblioteca pdf2image, que requiere una dependencia externa llamada poppler.
+A. Configuración Adicional
+ * Instala poppler:
+   * Windows: Descarga los binarios de Poppler, descomprímelos y añade la carpeta bin a tu PATH.
+   * macOS (usando Homebrew): brew install poppler
+   * Linux (Debian/Ubuntu): sudo apt-get install -y poppler-utils
+ * Añade la biblioteca a requirements.txt:
+   # ... (las demás librerías) ...
+pdf2image
+
+   Y ejecuta pip install -r requirements.txt.
+B. Script prepare_vision_data.py
+Crea un nuevo archivo en src/prepare_vision_data.py. Este script leerá tus PDFs de data/raw y guardará la primera página de cada uno en una nueva carpeta data/vision/images, organizada por etiquetas.
+# src/prepare_vision_data.py
+
+import os
+from pathlib import Path
+import logging
+from pdf2image import convert_from_path
+import shutil
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Rutas de entrada y salida
+RAW_DATA_FOLDER = Path('data/raw')
+VISION_DATA_FOLDER = Path('data/vision/images')
+
+# Mapeo de carpetas a etiquetas (el mismo de preprocessing.py)
+LABEL_MAP = {
+    'demanda_monitorio': 'demanda monitorio',
+    'decanato_monitorio': 'decanato monitorio',
+    'admision_tramite': 'admisión a trámite',
+    'decanato_ejecutivo': 'decanato ejecutivo'
+}
+
+def main():
+    """
+    Convierte la primera página de cada PDF en data/raw a una imagen PNG
+    y la guarda en una estructura de carpetas apta para image classification.
+    """
+    logging.info("--- Iniciando preparación de datos para modelo de visión ---")
+
+    if VISION_DATA_FOLDER.exists():
+        logging.warning(f"La carpeta de destino {VISION_DATA_FOLDER} ya existe. Se eliminará para empezar de cero.")
+        shutil.rmtree(VISION_DATA_FOLDER)
+    
+    logging.info(f"Creando estructura de carpetas en {VISION_DATA_FOLDER}")
+    
+    total_files_processed = 0
+    
+    for folder_name, label_name in LABEL_MAP.items():
+        input_folder = RAW_DATA_FOLDER / folder_name
+        output_label_folder = VISION_DATA_FOLDER / folder_name # Usar el nombre de la carpeta como etiqueta
+        
+        if not input_folder.is_dir():
+            logging.warning(f"Carpeta de entrada no encontrada, saltando: {input_folder}")
+            continue
+            
+        output_label_folder.mkdir(parents=True, exist_ok=True)
+        logging.info(f"Procesando carpeta '{folder_name}' -> '{output_label_folder}'")
+        
+        for pdf_path in input_folder.glob('*.pdf'):
+            try:
+                # Convertir solo la primera página (first_page=1, last_page=1)
+                # DPI (Dots Per Inch) controla la resolución. 300 es una buena calidad.
+                images = convert_from_path(pdf_path, dpi=300, first_page=1, last_page=1)
+                
+                if images:
+                    image = images[0]
+                    # Nombre del archivo de salida
+                    output_image_path = output_label_folder / f"{pdf_path.stem}.png"
+                    image.save(output_image_path, 'PNG')
+                    logging.info(f"  -> Guardada imagen: {output_image_path.name}")
+                    total_files_processed += 1
+                else:
+                    logging.warning(f"No se pudo extraer ninguna página de '{pdf_path.name}'")
+            except Exception as e:
+                logging.error(f"Error procesando el PDF '{pdf_path.name}': {e}")
+                
+    logging.info(f"\n--- Proceso completado. Total de imágenes generadas: {total_files_processed} ---")
+
+if __name__ == "__main__":
+    main()
+
+Paso 2: Preparar el Script de Entrenamiento
+Ahora, el script principal para entrenar el modelo. Este usará las bibliotecas de Hugging Face (transformers, datasets) y PyTorch.
+A. Configuración Adicional
+ * Añade las bibliotecas a requirements.txt:
+   # ... (las demás librerías) ...
+torch
+torchvision
+transformers
+datasets
+scikit-learn # Para métricas
+evaluate # Para métricas
+
+   Y ejecuta pip install -r requirements.txt. IMPORTANTE: Para aprovechar una GPU NVIDIA, asegúrate de instalar la versión de PyTorch compatible con CUDA.
+B. Script train_vision_model.py
+Crea el archivo src/train_vision_model.py. Este script es más complejo, pero sigue una estructura estándar de Hugging Face.
+# src/train_vision_model.py
+
+from datasets import load_dataset
+from transformers import ViTImageProcessor, ViTForImageClassification, TrainingArguments, Trainer
+import torch
+import numpy as np
+import evaluate # Hugging Face's evaluation library
+
+def main():
+    # --- 1. Cargar el Dataset de Imágenes ---
+    # `imagefolder` carga imágenes de subdirectorios, usando los nombres de
+    # los directorios como etiquetas.
+    dataset = load_dataset("imagefolder", data_dir="data/vision/images")
+
+    # Obtener las etiquetas y crear mapeos
+    labels = dataset["train"].features["label"].names
+    label2id = {label: i for i, label in enumerate(labels)}
+    id2label = {i: label for i, label in enumerate(labels)}
+    print(f"Etiquetas encontradas: {labels}")
+
+    # --- 2. Pre-procesamiento de las Imágenes ---
+    # Cargar el pre-procesador asociado al modelo que usaremos.
+    # Este se encarga de redimensionar y normalizar las imágenes.
+    model_checkpoint = "google/vit-base-patch16-224-in21k"
+    processor = ViTImageProcessor.from_pretrained(model_checkpoint)
+
+    # Función para aplicar la transformación a cada imagen
+    def transform(example_batch):
+        # Tomar una lista de imágenes y aplicar el procesador
+        inputs = processor([x for x in example_batch['image']], return_tensors='pt')
+        # Incluir las etiquetas
+        inputs['label'] = example_batch['label']
+        return inputs
+
+    # Aplicar la transformación. `with_transform` es eficiente y no modifica el dataset en disco.
+    prepared_ds = dataset.with_transform(transform)
+
+    # --- 3. Dividir el dataset en entrenamiento y prueba ---
+    # `stratify_by_column` asegura que la proporción de etiquetas sea la misma en ambos splits.
+    splits = prepared_ds['train'].train_test_split(test_size=0.2, stratify_by_column="label")
+    train_ds = splits['train']
+    test_ds = splits['test']
+
+    # --- 4. Cargar el Modelo Pre-entrenado para Fine-Tuning ---
+    model = ViTForImageClassification.from_pretrained(
+        model_checkpoint,
+        num_labels=len(labels),
+        id2label=id2label,
+        label2id=label2id,
+        ignore_mismatched_sizes=True # Necesario para reemplazar la capa de clasificación
+    )
+
+    # --- 5. Definir Métricas y Argumentos de Entrenamiento ---
+    # Función para calcular métricas durante el entrenamiento
+    accuracy_metric = evaluate.load("accuracy")
+    f1_metric = evaluate.load("f1")
+
+    def compute_metrics(eval_pred):
+        predictions, labels = eval_pred
+        predictions = np.argmax(predictions, axis=1)
+        
+        acc = accuracy_metric.compute(predictions=predictions, references=labels)
+        f1 = f1_metric.compute(predictions=predictions, references=labels, average="weighted")
+        
+        return {"accuracy": acc["accuracy"], "f1": f1["f1"]}
+
+    # Collator para crear lotes de datos
+    def collate_fn(batch):
+        return {
+            'pixel_values': torch.stack([x['pixel_values'] for x in batch]),
+            'labels': torch.tensor([x['label'] for x in batch])
+        }
+
+    # Argumentos del entrenamiento
+    training_args = TrainingArguments(
+        output_dir="./models/vision_model",
+        per_device_train_batch_size=8,  # Reducir si tienes poca VRAM (ej. 4)
+        evaluation_strategy="steps",
+        num_train_epochs=3,             # Para una POC, 3-4 épocas es suficiente
+        save_steps=10,
+        eval_steps=10,
+        logging_steps=10,
+        learning_rate=2e-5,             # Tasa de aprendizaje más baja para fine-tuning
+        save_total_limit=2,
+        remove_unused_columns=False,
+        push_to_hub=False,
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
+        report_to="none"
+    )
+
+    # --- 6. Entrenar el Modelo ---
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        data_collator=collate_fn,
+        compute_metrics=compute_metrics,
+        train_dataset=train_ds,
+        eval_dataset=test_ds,
+        tokenizer=processor, # El procesador de imágenes también se pasa como 'tokenizer'
+    )
+
+    print("\n--- ¡Iniciando entrenamiento del modelo de visión! ---")
+    trainer.train()
+    
+    print("\n--- Entrenamiento completado. Guardando el mejor modelo... ---")
+    trainer.save_model("./models/vision_model/best")
+    print("\nModelo guardado exitosamente en ./models/vision_model/best")
+
+if __name__ == "__main__":
+    main()
+
+Cómo Ejecutar la POC de Visión
+ * Prepara los Datos:
+   python src/prepare_vision_data.py
+
+   Esto creará la carpeta data/vision/images con las primeras páginas de tus PDFs convertidas a imágenes PNG, organizadas por clase.
+ * Entrena el Modelo:
+   python src/train_vision_model.py
+
+   Este script se encargará de todo: cargar las imágenes, pre-procesarlas, cargar el modelo ViT, entrenarlo (haciendo fine-tuning) y guardarlo.
+Consideraciones Clave:
+ * ¡Necesitas una GPU! Entrenar un modelo de visión, incluso con fine-tuning, es extremadamente lento en una CPU. Una GPU NVIDIA con al menos 8GB de VRAM es muy recomendable.
+ * Ajusta los Hiperparámetros: Si te quedas sin memoria (CUDA out of memory), reduce el per_device_train_batch_size en TrainingArguments (por ejemplo, a 4 o 2).
+ * Este es un Punto de Partida: Este script demuestra la viabilidad. Para un sistema en producción, podrías explorar modelos más avanzados (como DiT o LayoutLM si quieres combinar visión y texto) o técnicas como procesar más de una página.
+Este enfoque te dará una excelente primera idea del poder que tiene el análisis visual para tu problema de clasificación, complementando perfectamente tu trabajo previo con el texto.
