@@ -269,3 +269,210 @@ def is_anomalous_text(text):
         return True
         
     return False
+
+
+
+Claro, puedes integrar un flujo de trabajo más sofisticado en tu script prepare_vision_data.py para seleccionar la página más representativa de cada documento, descartando el "ruido" inicial. Usar Tesseract como una alternativa gratuita a Azure para el OCR es una excelente opción para una POC local.
+Aquí tienes la guía completa, incluyendo la configuración y el script modificado que incorpora todas tus reglas de descarte.
+1. Configuración Adicional del Entorno
+Además de poppler, necesitarás instalar el motor de OCR Tesseract y su wrapper de Python.
+A. Instala el motor Tesseract OCR:
+ * Windows: Descarga e instala desde el instalador oficial de Tesseract. Asegúrate de que durante la instalación, la ruta del ejecutable se añada a tu variable de entorno PATH.
+ * macOS (usando Homebrew): brew install tesseract
+ * Linux (Debian/Ubuntu): sudo apt install tesseract-ocr tesseract-ocr-spa (instala también el paquete de idioma español).
+B. Añade las bibliotecas a requirements.txt:
+# ... (las demás librerías) ...
+pdf2image
+pytesseract
+Pillow # A menudo es una dependencia, pero es bueno tenerla explícita
+
+Luego, ejecuta pip install -r requirements.txt.
+2. Script prepare_vision_data.py Actualizado
+Este script ahora contiene toda la lógica para iterar por las páginas, aplicar OCR selectivamente y usar tus reglas de filtrado para encontrar la primera página válida.
+# src/prepare_vision_data.py
+
+import os
+import shutil
+import logging
+from pathlib import Path
+from pdf2image import convert_from_path
+import pytesseract
+from pypdf import PdfReader
+
+# --- Configuración ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Windows: Si Tesseract no está en el PATH, especifica la ruta
+# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+# --- Constantes de Filtrado ---
+LEXNET_MARKER = "Mensaje LexNET -"
+MIN_TEXT_LENGTH = 1000
+REJECTION_STRINGS = [
+    "Todas las horas referidas por LexNET son de ámbito Peninsular",
+    "Protección de Datos:\nEl ‘Órgano Jurisdiccional u Oficina Judicial’"
+]
+EMAIL_HEADER_STRINGS = [
+    "INFORMACIÓN DEL EMAIL", "De", "Destinatarios",
+    "Asunto", "Adjuntos", "Fecha de envío"
+]
+
+# --- Rutas de Datos ---
+RAW_DATA_FOLDER = Path('data/raw')
+VISION_DATA_FOLDER = Path('data/vision/images')
+LABEL_MAP = {
+    'demanda_monitorio': 'demanda monitorio', 'decanato_monitorio': 'decanato monitorio',
+    'admision_tramite': 'admisión a trámite', 'decanato_ejecutivo': 'decanato ejecutivo'
+}
+
+
+# --- Funciones de Lógica ---
+
+def is_anomalous_text(text: str) -> bool:
+    """Detecta si el texto extraído es anómalo."""
+    if not text or not text.strip():
+        return True
+    
+    if len(text.strip()) < 300 and "Este documento es una copia auténtica del documento" not in text:
+        return True
+    
+    try:
+        non_alpha_chars = sum(1 for c in text if not c.isalnum() and not c.isspace())
+        total_chars = len(text)
+        if total_chars > 0 and (non_alpha_chars / total_chars > 0.15):
+            logging.info("    -> Texto pypdf marcado como anómalo (caracteres no alfanuméricos > 15%).")
+            return True
+    except ZeroDivisionError:
+        return True
+        
+    return False
+
+def run_ocr_on_page(page_image) -> str:
+    """Ejecuta Tesseract en una imagen de página y devuelve el texto."""
+    try:
+        # Usar el idioma español para mejorar la precisión
+        text = pytesseract.image_to_string(page_image, lang='spa')
+        logging.info("    -> OCR con Tesseract completado.")
+        return text
+    except Exception as e:
+        logging.error(f"    -> Error durante OCR con Tesseract: {e}")
+        return ""
+
+def is_page_valid(text: str) -> bool:
+    """Aplica todas las reglas de filtrado a un bloque de texto de una página."""
+    if not text:
+        return False
+    # 1. Filtro de longitud mínima
+    if len(text) < MIN_TEXT_LENGTH:
+        logging.info(f"    -> RECHAZADA: Texto demasiado corto ({len(text)} < {MIN_TEXT_LENGTH} caracteres).")
+        return False
+    # 2. Filtro de marcador LexNET principal
+    if LEXNET_MARKER in text:
+        logging.info("    -> RECHAZADA: Contiene marcador 'Mensaje LexNET -'.")
+        return False
+    # 3. Filtro de strings de rechazo específicos
+    for reject_str in REJECTION_STRINGS:
+        if reject_str in text:
+            logging.info(f"    -> RECHAZADA: Contiene el texto de descarte '{reject_str[:30]}...'.")
+            return False
+    # 4. Filtro de cabecera de email (deben estar todos los strings)
+    if all(header in text for header in EMAIL_HEADER_STRINGS):
+        logging.info("    -> RECHAZADA: Contiene todos los marcadores de cabecera de email.")
+        return False
+    
+    logging.info("    -> ¡PÁGINA VÁLIDA ENCONTRADA!")
+    return True
+
+def process_pdf(pdf_path: Path, output_folder: Path):
+    """
+    Itera por las páginas de un PDF hasta encontrar la primera válida,
+    la convierte en imagen y la guarda.
+    """
+    logging.info(f"  Procesando PDF: {pdf_path.name}")
+    try:
+        reader = PdfReader(pdf_path)
+        for i, page in enumerate(reader.pages):
+            page_num = i + 1
+            logging.info(f"    Analizando página {page_num}...")
+            
+            # 1. Extraer texto con pypdf
+            best_text = page.extract_text() or ""
+            page_image = None
+            
+            # 2. Si es anómalo, usar OCR
+            if is_anomalous_text(best_text):
+                logging.info("    -> Texto pypdf anómalo. Intentando OCR con Tesseract...")
+                images = convert_from_path(pdf_path, dpi=300, first_page=page_num, last_page=page_num)
+                if images:
+                    page_image = images[0]
+                    best_text = run_ocr_on_page(page_image)
+
+            # 3. Validar el texto obtenido
+            if is_page_valid(best_text):
+                # Si la imagen no se generó para OCR, la creamos ahora
+                if page_image is None:
+                    images = convert_from_path(pdf_path, dpi=300, first_page=page_num, last_page=page_num)
+                    if images:
+                        page_image = images[0]
+
+                if page_image:
+                    output_image_path = output_folder / f"{pdf_path.stem}.png"
+                    page_image.save(output_image_path, 'PNG')
+                    logging.info(f"    -> Imagen guardada: {output_image_path.name}\n")
+                    return True # Se encontró y guardó la página, terminar con este PDF
+                else:
+                    logging.error("    -> No se pudo generar la imagen para la página válida.")
+        
+        logging.warning(f"  No se encontró ninguna página válida en '{pdf_path.name}' según los criterios.\n")
+        return False
+    except Exception as e:
+        logging.error(f"  Error crítico procesando el PDF '{pdf_path.name}': {e}\n")
+        return False
+
+def main():
+    logging.info("--- Iniciando preparación de datos para modelo de visión (con filtros avanzados) ---")
+    if VISION_DATA_FOLDER.exists():
+        logging.warning(f"La carpeta de destino {VISION_DATA_FOLDER} ya existe. Se eliminará.")
+        shutil.rmtree(VISION_DATA_FOLDER)
+    
+    total_files_processed = 0
+    total_images_generated = 0
+    
+    for folder_name in LABEL_MAP.keys():
+        input_folder = RAW_DATA_FOLDER / folder_name
+        output_label_folder = VISION_DATA_FOLDER / folder_name
+        
+        if not input_folder.is_dir():
+            logging.warning(f"Carpeta de entrada no encontrada, saltando: {input_folder}")
+            continue
+            
+        output_label_folder.mkdir(parents=True, exist_ok=True)
+        logging.info(f"\nProcesando carpeta '{folder_name}' -> '{output_label_folder}'")
+        
+        for pdf_path in sorted(input_folder.glob('*.pdf')):
+            total_files_processed += 1
+            if process_pdf(pdf_path, output_label_folder):
+                total_images_generated += 1
+                
+    logging.info("--- Proceso completado ---")
+    logging.info(f"PDFs totales analizados: {total_files_processed}")
+    logging.info(f"Imágenes válidas generadas: {total_images_generated}")
+
+if __name__ == "__main__":
+    main()
+
+Cómo Funciona el Nuevo Script
+ * Iteración por PDF: El script recorre cada PDF de tu conjunto de datos.
+ * Iteración por Página: Para cada PDF, empieza en la página 1 y avanza.
+ * Extracción de Texto: Intenta extraer texto con pypdf.
+ * Detección de Anomalía: Usa is_anomalous_text para ver si el texto de pypdf es de baja calidad.
+ * OCR con Tesseract (si es necesario): Si el texto es anómalo, el script convierte esa página específica en una imagen y usa pytesseract para realizar el OCR, obteniendo un texto de mayor calidad. La variable best_text contendrá el texto de pypdf o el de Tesseract.
+ * Validación con is_page_valid: Esta función central comprueba el best_text contra todas tus reglas en orden:
+   * ¿Tiene más de 1000 caracteres?
+   * ¿Contiene el marcador Mensaje LexNET -?
+   * ¿Contiene alguna de las frases de descarte?
+   * ¿Contiene TODAS las palabras clave de una cabecera de email?
+ * Decisión:
+   * Si la página no pasa alguna de estas validaciones, se rechaza y el script pasa a analizar la siguiente página del mismo PDF.
+   * Si la página pasa todas las validaciones, se considera la primera página válida. Se convierte en una imagen PNG de alta calidad, se guarda en la carpeta de salida correspondiente a su etiqueta, y el script deja de procesar ese PDF para pasar al siguiente.
+ * Resultado Final: Al terminar, la carpeta data/vision/images contendrá únicamente una imagen por cada documento: la de la primera página que cumplió con todos tus estrictos criterios de calidad y contenido.
