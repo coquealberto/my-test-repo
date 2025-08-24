@@ -1,0 +1,577 @@
+# src/02_lora_finetune_integrated.py
+# #############################################################
+# ######        FUNCIONES AUXILIARES DE CARGA            ######
+# #############################################################
+from __future__ import annotations
+import os
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from datasets import Dataset
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
+from transformers import (
+    AutoTokenizer, AutoModel, Trainer, TrainingArguments, EarlyStoppingCallback
+)
+from peft import LoraConfig, get_peft_model, TaskType
+
+# ---------- 1. Chunking & Pooling (Sin cambios) ----------
+class Chunker:
+    def __init__(self, tokenizer, chunk_len=512, stride=384):
+        self.tok = tokenizer
+        self.chunk_len_user = chunk_len
+        self.stride = stride
+
+    def _max_len(self):
+        # Algunos tokenizers ponen model_max_length=1e30; si es así, fijamos un razonable
+        ml = getattr(self.tok, "model_max_length", 512)
+        if ml is None or ml > 10000:
+            ml = 512
+        return int(ml)
+
+    def __call__(self, text: str):
+        enc = self.tok(text, add_special_tokens=False)["input_ids"]
+        max_len = self._max_len()
+        # chunk_len efectivo (dejando hueco para especiales)
+        chunk_len = min(self.chunk_len_user, max_len - 2)
+        stride = min(self.stride, chunk_len) if chunk_len > 0 else 0
+
+        chunks = []
+        for start in range(0, len(enc), stride if stride > 0 else len(enc)):
+            end = start + chunk_len
+            ids = enc[start:end]
+            if not ids:
+                break
+            chunks.append(self.tok.build_inputs_with_special_tokens(ids))
+            if end >= len(enc):
+                break
+        if not chunks:
+            chunks = [self.tok.build_inputs_with_special_tokens([])]
+        return chunks
+
+class TokenMaskedMean(nn.Module):
+    """
+    Hace mean pooling sobre la dimensión de tokens con máscara.
+    input:  hidden_states [B, C, T, H], token_mask [B, C, T]
+    output: chunk_embs    [B, C, H]
+    """
+    def forward(self, hidden_states: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+        mask = token_mask.unsqueeze(-1).float()              # [B, C, T, 1]
+        sum_vec = (hidden_states * mask).sum(dim=2)          # [B, C, H]
+        lengths = mask.sum(dim=2).clamp(min=1e-6)            # [B, C, 1]
+        return sum_vec / lengths
+
+
+class ChunkAttentionPooling(nn.Module):
+    """
+    Atiende sobre los chunks y devuelve un embedding por documento.
+    input:  chunk_embs [B, C, H], chunk_mask [B, C]
+    output: doc_emb    [B, H]
+    """
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.query = nn.Linear(hidden_size, 1, bias=False)
+
+    def forward(self, chunk_embs: torch.Tensor, chunk_mask: torch.Tensor) -> torch.Tensor:
+        scores = self.query(chunk_embs).squeeze(-1)                  # [B, C]
+        scores = scores.masked_fill(chunk_mask == 0, -1e9)
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)         # [B, C, 1]
+        return (weights * chunk_embs).sum(dim=1)                     # [B, H]
+    
+def guess_target_modules(model_name: str):
+    name = model_name.lower()
+    if "longformer" in name:
+        return ["self_attn.q_proj", "self_attn.v_proj"]
+    if "roberta" in name or "bert" in name:
+        return ["query", "key", "value"]
+    if any(x in name for x in ["gpt", "llama", "mistral", "gemma"]):
+        return ["q_proj", "v_proj"]
+    return ["query", "value"]
+
+class DocClassifier(nn.Module):
+    def __init__(self, model_name: str, num_labels: int, dropout: float = 0.1,
+                 lora_r: int = 16, lora_alpha: int = 16, lora_dropout: float = 0.1):
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(model_name)
+
+        target_modules = guess_target_modules(model_name)
+        print(f"[LoRA] Aplicando en módulos: {target_modules}")
+        peft_config = LoraConfig(
+            task_type=TaskType.FEATURE_EXTRACTION,
+            r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+            target_modules=target_modules, bias="none"
+        )
+        self.encoder = get_peft_model(self.encoder, peft_config)
+        self.encoder.print_trainable_parameters()
+
+        self.config = self.encoder.config
+        H = self.config.hidden_size
+
+        self.token_pool = TokenMaskedMean()
+        self.chunk_pool = ChunkAttentionPooling(H)
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(H, num_labels)
+        self.config.num_labels = num_labels
+
+    def forward(self, input_ids, attention_mask, labels=None):
+        # input: [B, C, T] -> flatten a [B*C, T]
+        B, C, T = input_ids.shape
+        ids_flat  = input_ids.view(B * C, T)
+        mask_flat = attention_mask.view(B * C, T)
+
+        hidden = self.encoder(input_ids=ids_flat, attention_mask=mask_flat).last_hidden_state  # [B*C, T, H]
+        H = hidden.size(-1)
+
+        # reshape a [B, C, T, H] y [B, C, T]
+        hidden = hidden.view(B, C, T, H)
+        token_mask = attention_mask.view(B, C, T)
+
+        # 1) pooling por tokens -> [B, C, H]
+        chunk_embs = self.token_pool(hidden, token_mask)
+
+        # 2) máscara de chunk (al menos un token real en el chunk)
+        chunk_mask = (token_mask.sum(dim=2) > 0).long()  # [B, C]
+
+        # 3) atención sobre chunks -> [B, H]
+        doc_emb = self.chunk_pool(chunk_embs, chunk_mask)
+
+        # 4) clasificación
+        logits = self.classifier(self.dropout(doc_emb))  # [B, num_labels]
+        return {"logits": logits}
+
+# ---------- 2. Dataset & Collator (con mejoras) ----------
+class DocsDataset(torch.utils.data.Dataset):
+    def __init__(self, df: pd.DataFrame, tokenizer, labels_encoder: LabelEncoder, chunk_len, stride, include_procedure):
+        self.df = df.reset_index(drop=True)
+        self.tok = tokenizer
+        self.chunker = Chunker(tokenizer, chunk_len, stride)
+        self.le = labels_encoder
+        self.include_procedure = include_procedure
+        
+    def __len__(self):
+        return len(self.df)
+        
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        path = Path(row["markdown_path"])
+        text = path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+        if self.include_procedure:
+            proc = path.stem.split("_")[0]
+            text = f"[PROCEDIMIENTO: {proc}]{text}"
+            
+        chunks = self.chunker(text)
+        return {"chunks": chunks, "label": row["label_id"]}
+
+class DocCollator:
+    def __init__(self, tokenizer, max_chunks: int):
+        self.tok = tokenizer
+        self.max_chunks = max_chunks
+        # máximo duro por modelo (para Longformer 4096; RoBERTa 512)
+        ml = getattr(self.tok, "model_max_length", 512)
+        if ml is None or ml > 10000:
+            ml = 512
+        self.model_max_len = int(ml)
+
+    def __call__(self, batch):
+        labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
+
+        batch_chunks = [b["chunks"][:self.max_chunks] for b in batch]
+        max_c = max(len(chs) for chs in batch_chunks) if batch_chunks else 0
+
+        all_chunks = [ch for doc in batch_chunks for ch in doc]
+        max_l = max(len(ch) for ch in all_chunks) if all_chunks else 0
+        # clamp por seguridad
+        max_l = min(max_l, self.model_max_len)
+
+        ids_3d, mask_3d = [], []
+        pad_id = self.tok.pad_token_id
+
+        for doc_chunks in batch_chunks:
+            padded_ids, padded_mask = [], []
+            for ch in doc_chunks:
+                ch = ch[:max_l]  # recorta si algún chunk viene más largo por cualquier motivo
+                pad_len = max_l - len(ch)
+                padded_ids.append(ch + [pad_id] * pad_len)
+                padded_mask.append([1] * len(ch) + [0] * pad_len)
+            while len(padded_ids) < max_c:
+                padded_ids.append([pad_id] * max_l)
+                padded_mask.append([0] * max_l)
+
+            ids_3d.append(padded_ids)
+            mask_3d.append(padded_mask)
+
+        return {
+            "input_ids": torch.tensor(ids_3d, dtype=torch.long),      # [B, C, T]
+            "attention_mask": torch.tensor(mask_3d, dtype=torch.long),# [B, C, T]
+            "labels": labels
+        }
+        
+# ---------- 3. Trainer con pérdida ponderada ----------
+# Clase Trainer personalizada para usar pesos en la función de pérdida
+class WeightedLossTrainer(Trainer):
+    def __init__(self, class_weights=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+        self.loss_fct = nn.CrossEntropyLoss(
+            weight=self.class_weights if self.class_weights is not None else None
+        )
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+
+        # ⚡ Asegurar que los pesos estén en la misma device que los logits
+        if self.loss_fct.weight is not None:
+            self.loss_fct.weight = self.loss_fct.weight.to(logits.device)
+
+        loss = self.loss_fct(logits, labels)
+
+        return (loss, outputs) if return_outputs else loss
+
+
+import logging
+
+# Configuración básica de logging para ver los mensajes
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def load_data(file_path: Path) -> pd.DataFrame:
+    """
+    Carga datos desde un archivo CSV.
+    Asume que el CSV tiene columnas 'markdown_path' y 'label'.
+    """
+    if not file_path.exists():
+        logging.error(f"El archivo de datos etiquetados no se encuentra en: {file_path}")
+        logging.error("Asegúrate de haber ejecutado 'python src/preprocessing.py' primero.")
+        return None
+    try:
+        df = pd.read_csv(file_path)
+        required_cols = ['markdown_path', 'label']
+        df.dropna(subset=required_cols, inplace=True)
+        df['markdown_path'] = df['markdown_path'].astype(str)
+        df['label'] = df['label'].astype(str)
+
+        logging.info(f"Datos cargados desde {file_path}. Filas: {len(df)}")
+        if df.empty:
+            logging.error("El archivo CSV está vacío o no contiene datos válidos.")
+            return None
+        if 'markdown_path' not in df.columns:
+            logging.error(f"La columna 'markdown_path' no se encontró en {file_path}")
+            return None
+        return df
+    except Exception as e:
+        logging.error(f"Error cargando el archivo CSV {file_path}: {e}")
+        return None
+
+# ---------- 4. Función de Entrenamiento Principal ----------
+# ---------- 4. Función de Entrenamiento Principal ----------
+def run():
+    # #############################################################
+    # ######           CONFIGURACIÓN DEL EXPERIMENTO         ######
+    # #############################################################
+    
+    # --- Rutas y Datos ---
+    CSV_PATH = "data/labeled/labeled_documents_tess_2000_36.csv" # CSV con 'markdown_path' y 'label'
+    OUTPUT_DIR = "experiments/encoder_finetune_v2"
+    
+    # --- Modelo ---
+    MODEL_NAME = "experiments/dapt_mlm_local/checkpoint-3500" # o "roberta-base-bne"
+    
+    # --- Preprocesamiento ---
+    CHUNK_LEN = 512
+    STRIDE = 384
+    MAX_CHUNKS = 16 # Límite de chunks por documento para controlar uso de VRAM
+    INCLUDE_PROCEDURE = True # Añadir nombre del procedimiento al inicio del texto
+    
+    # --- División de Datos ---
+    TEST_SIZE = 0.15
+    VAL_SIZE = 0.15
+    SEED = 42
+
+    # --- Hiperparámetros de Entrenamiento ---
+    EPOCHS = 5
+    BATCH_SIZE = 4 # Por GPU
+    GRAD_ACCUM = 8 # Batch efectivo = BATCH_SIZE * GRAD_ACCUM
+    LEARNING_RATE = 2e-5
+    USE_CLASS_WEIGHTS = True # Poner en True si las clases están desbalanceadas
+    
+    # --- Hiperparámetros de LoRA ---
+    LORA_R = 16
+    LORA_ALPHA = 16
+    LORA_DROPOUT = 0.1
+
+    # --- Evaluación ---
+    EVAL_STEPS = 25
+    EARLY_STOPPING_PATIENCE = 3
+
+    # #############################################################
+
+    # Carga y preparación de datos
+    # --- Usamos tu función robusta para cargar el CSV ---
+    df = load_data(Path(CSV_PATH))
+    if df is None:
+        print("Finalizando el script debido a un error en la carga de datos.")
+        return # Salir si el DataFrame no se pudo cargar
+    
+    le = LabelEncoder()
+    df["label_id"] = le.fit_transform(df["label"].astype(str))
+    num_labels = len(le.classes_)
+    
+    # División estratificada
+    train_df, test_df = train_test_split(df, test_size=TEST_SIZE, random_state=SEED, stratify=df["label_id"])
+    val_rel_size = VAL_SIZE / (1 - TEST_SIZE)
+    train_df, val_df = train_test_split(train_df, test_size=val_rel_size, random_state=SEED, stratify=train_df["label_id"])
+    
+    print(f"Tamaños -> Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+
+    # Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    # Crear datasets y collator
+    train_ds = DocsDataset(train_df, tokenizer, le, CHUNK_LEN, STRIDE, INCLUDE_PROCEDURE)
+    val_ds = DocsDataset(val_df, tokenizer, le, CHUNK_LEN, STRIDE, INCLUDE_PROCEDURE)
+    test_ds = DocsDataset(test_df, tokenizer, le, CHUNK_LEN, STRIDE, INCLUDE_PROCEDURE)
+    collator = DocCollator(tokenizer, max_chunks=MAX_CHUNKS)
+
+    # Modelo
+    model = DocClassifier(MODEL_NAME, num_labels, lora_r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT)
+    if tokenizer.pad_token_id is not None:
+        model.encoder.config.pad_token_id = tokenizer.pad_token_id
+    
+    # Pesos de clase (si está activado)
+    class_weights = None
+    if USE_CLASS_WEIGHTS:
+        weights = compute_class_weight('balanced', classes=np.unique(train_df['label_id']), y=train_df['label_id'])
+        class_weights = torch.tensor(weights, dtype=torch.float)
+        print(f"Usando pesos de clase para {num_labels} etiquetas.")
+
+    # Argumentos de entrenamiento
+    training_args = TrainingArguments(
+        output_dir=OUTPUT_DIR,
+        eval_strategy="steps",
+        eval_steps=EVAL_STEPS,
+        save_strategy="steps",
+        save_steps=EVAL_STEPS,
+        save_total_limit=2,
+        learning_rate=LEARNING_RATE,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM,
+        num_train_epochs=EPOCHS,
+        weight_decay=0.01,
+        warmup_ratio=0.06,
+        logging_steps=10,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_f1", # Usar F1 para decidir el mejor modelo
+        greater_is_better=True,
+        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+        fp16=torch.cuda.is_available() and not (torch.cuda.is_bf16_supported()),
+        report_to="none", # Desactiva reportes a wandb/tensorboard
+        # --- LA SOLUCIÓN ESTÁ AQUÍ ---
+        # Le decimos al Trainer que no borre la columna 'chunks',
+        # ya que la necesitamos en nuestro collator personalizado.
+        remove_unused_columns=False, 
+    )
+
+    # Función para computar métricas
+    def compute_metrics(eval_pred):
+        logits, labels = eval_pred
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        
+        preds = np.argmax(logits, axis=-1)
+        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro', zero_division=0)
+        acc = accuracy_score(labels, preds)
+        
+        return {"accuracy": acc, "precision": precision, "recall": recall, "f1": f1}
+
+    # Inicializar el Trainer personalizado
+    trainer = WeightedLossTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        tokenizer=tokenizer,
+        data_collator=collator,
+        compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)],
+        class_weights=class_weights,
+    )
+
+    print("Iniciando entrenamiento...")
+    trainer.train()
+    print("Entrenamiento finalizado.")
+
+    print("Evaluando el modelo en el conjunto de prueba...")
+    test_results = trainer.predict(test_ds)
+    y_true = test_ds.df["label_id"].values
+    y_pred = np.argmax(test_results.predictions[0], axis=-1)
+
+    print("--- Reporte de Clasificación en el Conjunto de Prueba ---")
+    print(classification_report(y_true, y_pred, target_names=le.classes_, zero_division=0))
+
+    # Guardar modelo final, tokenizer y el LabelEncoder
+    final_model_path = os.path.join(OUTPUT_DIR, "final_model")
+    trainer.save_model(final_model_path)
+    tokenizer.save_pretrained(final_model_path)
+    pd.Series(le.classes_).to_csv(os.path.join(final_model_path, "labels.csv"), index=False, header=False)
+    print(f"Modelo final guardado en: {final_model_path}")
+
+if __name__ == "__main__":
+    run()
+
+
+
+## 01_dapt_pretrain
+
+
+from __future__ import annotations
+import os
+import argparse
+from pathlib import Path
+import datasets
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForMaskedLM, DataCollatorForLanguageModeling, Trainer, TrainingArguments
+import torch
+
+"""
+Uso:
+python -m src.01_dapt_pretrain \
+  --model_name PlanTL-GOB-ES/roberta-base-bne \
+  --corpus_dir data/processed_norm \
+  --output_dir experiments/dapt_mlm \
+  --max_seq_len 512 --mask_prob 0.15 \
+  --lr 5e-5 --batch_size 16 --grad_accum 16 --max_steps 100000 --warmup_ratio 0.05
+"""
+
+# --- Rutas y Modelo ---
+MODEL_NAME = "Narrativa/legal-longformer-base-4096-spanish"  # Modelo base que se va a fine-tunear.
+CORPUS_DIR = Path("data/processed_tess_70k_cleaned")       # Directorio con los textos preprocesados (.txt).
+OUTPUT_DIR = Path("experiments/dapt_mlm_local")# Directorio donde se guardará el modelo resultante.
+
+# --- Parámetros de Tokenización y Modelo ---
+MAX_SEQ_LEN = 2048    # Longitud máxima de las secuencias. Textos más largos serán truncados.
+MASK_PROB = 0.15      # Probabilidad de enmascarar un token (estándar: 0.15).
+
+# --- Parámetros de Entrenamiento ---
+LEARNING_RATE = 5e-5    # Tasa de aprendizaje.
+BATCH_SIZE = 4        # Tamaño del lote por dispositivo (GPU/CPU). Ajústalo a la memoria de tu GPU.
+GRAD_ACCUM = 16       # Pasos de acumulación de gradiente. El tamaño de lote efectivo será BATCH_SIZE * GRAD_ACCUM.
+MAX_STEPS = 3500     # Número máximo de pasos de entrenamiento.
+WARMUP_RATIO = 0.05   # Proporción de pasos para el calentamiento del optimizador.
+SAVE_STEPS = 500     # Guardar un checkpoint cada X pasos.
+SEED = 42             # Semilla para reproducibilidad.
+# --------------------------------------------------------------------------
+
+
+def load_corpus(corpus_dir: Path) -> Dataset:
+    paths = sorted([str(p) for p in Path(corpus_dir).glob("**/*.txt")])
+    if not paths:
+        raise FileNotFoundError(f"No se encontraron .txt en {corpus_dir}")
+    print(f"Encontrados {len(paths)} ficheros en {corpus_dir.resolve()}")
+    def gen():
+        for p in paths:
+            try:
+                yield {"text": Path(p).read_text(encoding="utf-8")}
+            except Exception as e:
+                print(f"Error leyendo {p}: {e}, se omitirá.")
+    ds = Dataset.from_generator(gen)
+    return ds
+
+
+def run_training():
+    """Función principal que ejecuta el proceso de entrenamiento."""
+    # He unificado el mensaje de inicio para que refleje el modelo y la longitud
+    print(f"--- Iniciando Proceso de DAPT con {MODEL_NAME} (MAX_SEQ_LEN={MAX_SEQ_LEN}) ---") ## <-- CAMBIO (Estético)
+    
+    torch.manual_seed(SEED)
+
+    # --- Carga de Modelo y Tokenizador ---
+    # Es una buena práctica cargarlos juntos
+    print(f"Cargando tokenizador y modelo desde: {MODEL_NAME}")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+    model = AutoModelForMaskedLM.from_pretrained(MODEL_NAME)
+    
+    # El bloque 'if tokenizer.pad_token is None:' se ha eliminado porque es innecesario para Longformer. ## <-- CAMBIO (Limpieza)
+
+    # --- Carga y Procesamiento del Corpus ---
+    print(f"Cargando corpus desde: {CORPUS_DIR}")
+    ds = load_corpus(CORPUS_DIR)
+
+    def tok_fn(batch):
+        return tokenizer(
+            batch["text"],
+            truncation=True,
+            max_length=MAX_SEQ_LEN,
+            return_special_tokens_mask=True
+        )
+
+    print(f"Tokenizando el dataset con {os.cpu_count() // 2} procesos (esto puede tardar)...")
+    # Añadimos num_proc para acelerar drásticamente la tokenización usando múltiples núcleos de la CPU.
+    ds = ds.map(
+        tok_fn,
+        batched=True,
+        remove_columns=["text"],
+        num_proc=os.cpu_count() // 2  ## <-- CAMBIO (¡Optimización de Velocidad Clave!)
+    )
+    print("Dataset tokenizado con éxito.")
+
+    # --- Preparación del Entrenador ---
+    collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm_probability=MASK_PROB
+    )
+    
+    use_gpu = torch.cuda.is_available()
+    print(f"GPU disponible: {use_gpu}")
+
+    training_args = TrainingArguments(
+        output_dir=str(OUTPUT_DIR),
+        overwrite_output_dir=True,
+        learning_rate=LEARNING_RATE,
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM,
+        max_steps=MAX_STEPS,
+        warmup_ratio=WARMUP_RATIO,
+        weight_decay=0.01,
+        lr_scheduler_type="linear",
+        logging_steps=100,
+        save_steps=SAVE_STEPS,
+        save_total_limit=3, # Reducido a 3 para ahorrar espacio, 5 también está bien. ## <-- CAMBIO (Menor)
+        dataloader_num_workers=os.cpu_count() // 2,
+        bf16=use_gpu and torch.cuda.is_bf16_supported(),
+        fp16=use_gpu and not torch.cuda.is_bf16_supported(),
+        report_to=[],
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=ds,
+        data_collator=collator
+    )
+    
+    # --- Iniciar Entrenamiento ---
+    print("--- ¡Comenzando el entrenamiento! ---")
+    print(f"Batch size por dispositivo: {BATCH_SIZE}")
+    print(f"Acumulación de gradiente: {GRAD_ACCUM}")
+    print(f"Batch size efectivo global: {BATCH_SIZE * GRAD_ACCUM}")
+    print(f"Modelo se guardará en: {OUTPUT_DIR.resolve()}")
+    
+    trainer.train()
+    
+    # --- Guardado Final ---
+    print("--- Entrenamiento completado. Guardando modelo final... ---")
+    trainer.save_model(str(OUTPUT_DIR))
+    tokenizer.save_pretrained(str(OUTPUT_DIR))
+    print(f"¡Modelo y tokenizador guardados exitosamente en {OUTPUT_DIR.resolve()}!")
+
+
+if __name__ == "__main__":
+    run_training()
